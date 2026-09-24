@@ -187,6 +187,38 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         else if (current.evidence.length < 5) { current.score = Math.max(current.score, callerScore); current.evidence.push(evidenceItem) }
       }
     }
+    // Some legacy dataServer modules pass enum members such as
+    // `apiConfig.queryReceiptList` to fetch(). The index deliberately avoids
+    // guessing through unresolved enum indirection, so recover only mappings
+    // whose symbol is named by this route (or by already relevant source).
+    // The URL still comes from checked-in source and must have an existing mock
+    // below before it can become creation evidence.
+    const routeDomain = routeSegments[0]?.toLowerCase() || ''
+    const domainApiConfig = `src/dataServer/${routeDomain}/apiconfig.ts`
+    try {
+      const configText = await readFile(join(source, domainApiConfig), 'utf8')
+      const enumApiPattern = /\b([A-Za-z_$][\w$]*)\s*=\s*['"]([^'"]+\.json)['"]/g
+      for (const match of configText.matchAll(enumApiPattern)) {
+        const symbol = match[1]
+        const rawUrl = match[2]
+        const referenced = relevantSource.find(item => item.text.includes(symbol))
+        const routeNamed = Boolean(routeToken) && symbol.toLowerCase().includes(routeToken)
+        if (!routeNamed && !referenced) continue
+        const apiUrl = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`
+        const score = (routeNamed ? 140 : 90) + queryScore(`${symbol} ${apiUrl}`)
+        const evidenceItem = {
+          file: domainApiConfig,
+          via: `config:${symbol}`,
+          source: 'source.apiConfigSymbol'
+        }
+        const current = apiMap.get(apiUrl)
+        if (!current) apiMap.set(apiUrl, { apiUrl, score, evidence: [evidenceItem] })
+        else if (current.evidence.length < 5) {
+          current.score = Math.max(current.score, score)
+          current.evidence.push(evidenceItem)
+        }
+      }
+    } catch {}
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
     for (const apiUrl of explicitApis) {
       if (typeof apiUrl !== 'string') continue
