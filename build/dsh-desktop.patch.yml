@@ -12,6 +12,9 @@
   disabled: true
 
 - insert:
+    - id: dsh-desktop-business
+      name: dsh-desktop-business
+
     - id: dsh-desktop-client-ui
       name: dsh-desktop-client-ui
 

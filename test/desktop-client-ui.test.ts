@@ -11,6 +11,30 @@ interface Registration {
 }
 
 describe('DSH Desktop client slot occupants', () => {
+  it('supports the preload-published business URL when a context bridge is unavailable', async () => {
+    const [client, preload] = await Promise.all([
+      readFile(path.join(projectRoot, 'packages', 'dsh-desktop-client-ui', 'client.js'), 'utf8'),
+      readFile(path.join(projectRoot, 'src', 'preload', 'index.ts'), 'utf8')
+    ])
+
+    expect(preload).toContain("document.documentElement.dataset.dshBusinessPreviewUrl = value.url")
+    expect(preload).toContain("if (!document.documentElement.dataset.dshBusinessPreviewUrl)")
+    expect(preload).toContain("window.dispatchEvent(new Event(BUSINESS_PREVIEW_READY_EVENT))")
+    expect(client).toContain('if (window.top?.document) hostWindow = window.top')
+    expect(client).toContain('hostWindow.dshDesktop?.businessPreviewUrl?.()')
+    expect(client).toContain('fetch(`/api/dsh-desktop/business-preview')
+    expect(client).toContain("dataset.dshBusinessSessionId = props.sessionId")
+    expect(client).toContain("hostWindow.addEventListener('dsh-desktop:business-session-change'")
+    expect(client).toContain("current.searchParams.get('__dshSession') !== next.searchParams.get('__dshSession')")
+    expect(client).toContain('retryTimer = window.setTimeout(discover, 1000)')
+    expect(client).not.toContain('客户端未能发现业务预览地址。')
+    expect(client).toContain("frame.dataset.dshBusinessPreviewPersistent = 'true'")
+    expect(client).toContain('businessFrameParking().appendChild(frame)')
+    expect(client).toContain('return mountBusinessFrame(frameContainer, state.url)')
+    expect(client).toContain("hostWindow.addEventListener('dsh-desktop:business-preview-ready'")
+    expect(client).toContain("parsed.hostname !== '127.0.0.1'")
+  })
+
   it('registers one occupant per brand seat and keeps the official name mark-free', async () => {
     const source = await readFile(
       path.join(projectRoot, 'packages', 'dsh-desktop-client-ui', 'client.js'),
@@ -82,14 +106,33 @@ describe('DSH Desktop client slot occupants', () => {
         return () => undefined
       }
     }
-    plugin.apply({ slots })
+    const tabDefinitions: Array<{ id: string; kind: string }> = []
+    const sidebarRight = { openTab: vi.fn() }
+    const sidebarRightTabs = {
+      register: (definition: { id: string; kind: string }) => {
+        tabDefinitions.push(definition)
+        return () => undefined
+      }
+    }
+    plugin.apply({
+      slots,
+      sidebarRight,
+      sidebarRightTabs,
+      effect: (effect: () => unknown) => effect()
+    })
 
-    expect(plugin.inject).toEqual(['slots'])
+    expect(plugin.inject).toEqual(['slots', 'sidebarRight', 'sidebarRightTabs'])
     expect(registrations.map(({ config }) => config.name)).toEqual([
+      'sidebar.right.pane.tab',
       'sidebar.brand.mark',
       'sidebar.brand.name',
-      'conversation.hero.brand.mark'
+      'conversation.hero.brand.mark',
+      'conversation.session.header.actions'
     ])
+    expect(tabDefinitions).toHaveLength(1)
+    expect(tabDefinitions[0]).toMatchObject({ id: 'dsh-desktop-business-preview', kind: 'business-preview' })
+    expect(registrations.find(({ config }) => config.id === 'business-preview')).toBeUndefined()
+    expect(registrations.find(({ config }) => config.id === 'business-sidebar-preview')?.config.order).toBe(81)
     // The mark is drawn in currentColor, so no theme stylesheet is injected.
     expect(appended).toHaveLength(0)
 

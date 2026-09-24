@@ -17,6 +17,8 @@ setupDesktopStoragePersistence()
 const ROOT_ID = 'dsh-desktop-update-root'
 const MOBILE_BUTTON_ID = 'dsh-desktop-mobile-button'
 const SAFE_MODE_BANNER_ID = 'dsh-desktop-safe-mode-banner'
+const BUSINESS_PREVIEW_READY_EVENT = 'dsh-desktop:business-preview-ready'
+const BUSINESS_PREVIEW_REQUEST_EVENT = 'dsh-desktop:business-preview-request'
 const locale: UpdateLocale = navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en'
 
 let host: HTMLDivElement | undefined
@@ -327,7 +329,30 @@ function initializeUi(): void {
   })
   void refreshMobileStatus()
   void mountSafeModeBanner()
+  void publishBusinessPreviewUrl()
 }
+
+async function publishBusinessPreviewUrl(): Promise<void> {
+  try {
+    const value = (await ipcRenderer.invoke('business:preview-url')) as { url?: unknown }
+    if (typeof value.url !== 'string') throw new Error('Business preview returned no URL.')
+    document.documentElement.dataset.dshBusinessPreviewUrl = value.url
+    delete document.documentElement.dataset.dshBusinessPreviewError
+  } catch (error) {
+    // Keep the last known-good loopback URL while the main process restarts the
+    // business service. Clearing it creates a race whenever the right panel is
+    // remounted during a Harness render/update.
+    if (!document.documentElement.dataset.dshBusinessPreviewUrl) {
+      document.documentElement.dataset.dshBusinessPreviewError = error instanceof Error ? error.message : String(error)
+    }
+  } finally {
+    window.dispatchEvent(new Event(BUSINESS_PREVIEW_READY_EVENT))
+  }
+}
+
+window.addEventListener(BUSINESS_PREVIEW_REQUEST_EVENT, () => {
+  void publishBusinessPreviewUrl()
+})
 
 window.addEventListener('error', (event) => {
   const err = event.error ?? event.message
@@ -355,7 +380,9 @@ contextBridge.exposeInMainWorld(
   Object.freeze({
     restartHarness: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('harness:restart'),
     uninstallMarket: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('market:uninstall'),
-    openInFinder: (path: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('harness:open-in-finder', path)
+    openInFinder: (path: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('harness:open-in-finder', path),
+    openBusinessPreview: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('business:open-preview'),
+    businessPreviewUrl: (): Promise<{ url: string }> => ipcRenderer.invoke('business:preview-url')
   })
 )
 

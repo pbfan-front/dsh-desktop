@@ -32,18 +32,22 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "package:dir": "npm run build && electron-builder --dir",
-    "package:dev:dir": "npm run build && electron-builder --dir --config electron-builder.dev.cjs",
-    "package:dev:mac:arm64": "node scripts/verify-target.mjs darwin arm64 && npm run build && electron-builder --mac --arm64 --publish never --config electron-builder.dev.cjs",
-    "package:dev:mac:x64": "node scripts/verify-target.mjs darwin x64 && npm run build && electron-builder --mac --x64 --publish never --config electron-builder.dev.cjs",
-    "package:dev:win": "node scripts/verify-target.mjs win32 x64 && npm run build && electron-builder --win --x64 --publish never --config electron-builder.dev.cjs",
-    "package:mac": "npm run build && electron-builder --mac --publish never",
-    "package:mac:arm64": "node scripts/verify-target.mjs darwin arm64 && npm run build && electron-builder --mac --arm64 --publish never",
-    "package:mac:x64": "node scripts/verify-target.mjs darwin x64 && npm run build && electron-builder --mac --x64 --publish never",
-    "package:win": "node scripts/verify-target.mjs win32 x64 && npm run build && electron-builder --win --x64 --publish never",
+    "business:sync": "node scripts/sync-business-package.mjs",
+    "business:verify": "node scripts/verify-business-package.mjs",
+    "business:accept": "node scripts/accept-business-scenarios.mjs build/business-package",
+    "package:dir": "npm run business:verify && npm run build && electron-builder --dir",
+    "package:dev:dir": "npm run business:verify && npm run build && electron-builder --dir --config electron-builder.dev.cjs",
+    "package:dev:mac:arm64": "node scripts/verify-target.mjs darwin arm64 && npm run business:verify && npm run build && electron-builder --mac --arm64 --publish never --config electron-builder.dev.cjs",
+    "package:dev:mac:x64": "node scripts/verify-target.mjs darwin x64 && npm run business:verify && npm run build && electron-builder --mac --x64 --publish never --config electron-builder.dev.cjs",
+    "package:dev:win": "node scripts/verify-target.mjs win32 x64 && npm run business:verify && npm run build && electron-builder --win --x64 --publish never --config electron-builder.dev.cjs",
+    "package:mac": "npm run business:verify && npm run build && electron-builder --mac --publish never",
+    "package:mac:arm64": "node scripts/verify-target.mjs darwin arm64 && npm run business:verify && npm run build && electron-builder --mac --arm64 --publish never",
+    "package:mac:x64": "node scripts/verify-target.mjs darwin x64 && npm run business:verify && npm run build && electron-builder --mac --x64 --publish never",
+    "package:win": "node scripts/verify-target.mjs win32 x64 && npm run business:verify && npm run build && electron-builder --win --x64 --publish never",
     "ppt:build": "node scripts/generate-zara-ppt-templates.mjs && node scripts/localize-ppt-templates.mjs && node scripts/enrich-ppt-templates.mjs && node scripts/build-ppt-runtime.mjs"
   },
   "dependencies": {
+    "dsh-desktop-business": "file:packages/dsh-desktop-business",
     "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/cordis-plugin-group": "1.0.2",
     "@deepseek-ai/cordis-plugin-hmr": "1.0.17",
@@ -324,6 +328,14 @@
       "!**/node_modules/@mistralai/mistralai/src/**"
     ],
     "extraResources": [
+      {
+        "from": "build/business-runtime.mjs",
+        "to": "business-runtime.mjs"
+      },
+      {
+        "from": "build/business-package",
+        "to": "business-package"
+      },
       {
         "from": "build/app-icon.png",
         "to": "icon.png"

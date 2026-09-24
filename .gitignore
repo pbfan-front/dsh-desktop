@@ -1,4 +1,5 @@
 node_modules/
+build/business-package*/
 out/
 dist/
 dist-dev/

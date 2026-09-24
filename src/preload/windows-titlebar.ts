@@ -17,6 +17,7 @@ export function mountWindowsTitlebarLayout(options: TitlebarLayoutMountOptions):
   installLayout(document)
   installDragRegion(document)
   trackSidebarLayout(document)
+  trackRightPanelTitlebarInset(document)
 
   document.addEventListener('pointerdown', () => {
     void ipcRenderer.invoke('desktop-titlebar:close-menu').catch((error: unknown) => {
@@ -59,6 +60,9 @@ function installLayout(document: Document): void {
     body.dsh-desktop-windows-titlebar-layout [data-slot="conversation.session.header"] > header {
       padding-right: calc(var(${CAPTION_WIDTH_PROPERTY}, 140px) + 52px) !important;
     }
+    body.dsh-desktop-windows-titlebar-layout [data-sidebar-right-panel] {
+      top: 36px !important;
+    }
     body.dsh-desktop-windows-titlebar-layout button,
     body.dsh-desktop-windows-titlebar-layout a,
     body.dsh-desktop-windows-titlebar-layout input,
@@ -82,6 +86,21 @@ function installLayout(document: Document): void {
     }
   `
   document.head.appendChild(style)
+}
+
+function trackRightPanelTitlebarInset(document: Document): void {
+  const sync = (): void => {
+    document.querySelectorAll<HTMLElement>('[data-sidebar-right-panel]').forEach((panel) => {
+      // The right-sidebar package injects `top: 0` dynamically and may recreate
+      // the panel whenever a tab opens. An important inline declaration keeps
+      // every late-mounted push/fullscreen panel below Windows caption controls.
+      panel.style.setProperty('top', '36px', 'important')
+    })
+  }
+
+  const observer = new MutationObserver(sync)
+  observer.observe(document.documentElement, { childList: true, subtree: true })
+  sync()
 }
 
 function installDragRegion(document: Document): void {

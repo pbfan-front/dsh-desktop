@@ -82,6 +82,17 @@ describe('DSH Desktop sidebar branding', () => {
     expect(patch).toContain('sidebar === 0 ? COLLAPSED_SIDEBAR_WIDTH')
   })
 
+  it('keeps the Windows right sidebar below the native caption controls', async () => {
+    const titlebar = await readFile(
+      path.join(projectRoot, 'src', 'preload', 'windows-titlebar.ts'),
+      'utf8'
+    )
+
+    expect(titlebar).toContain('[data-sidebar-right-panel]')
+    expect(titlebar).toContain('top: 36px !important')
+    expect(titlebar).toContain("panel.style.setProperty('top', '36px', 'important')")
+  })
+
   it('keeps the phone entry aligned at the right edge of the settings row', async () => {
     const [patch, preload, main, client] = await Promise.all([
       readFile(patchPath('@deepseek-ai/dsh-client-ui-sidebar'), 'utf8'),

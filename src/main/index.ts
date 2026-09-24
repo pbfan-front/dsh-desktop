@@ -1,4 +1,6 @@
 import { initializeDesktopService, desktopDiagnostics } from './desktop-service'
+import { BusinessPreview } from './business-preview'
+import { ensureBusinessWorkspace } from './business-workspace'
 import { checkBlockingPluginUpdates, selectPluginRecoveryTarget, PluginRecoveryEvidence, planPluginRecovery, runPluginRecoveryPlan, type PluginRecoveryCheck } from './plugin-recovery-market'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
@@ -175,6 +177,7 @@ const PLUGIN_RECOVERY_ACTIONS = new Set<PluginRecoveryAction>([
 ])
 
 let mainWindow: BrowserWindow | undefined
+let businessPreview: BusinessPreview | undefined
 let windowsMenuView: WebContentsView | undefined
 let windowsMenuOpen = false
 let windowsMenuDark = false
@@ -2543,6 +2546,13 @@ function installMenu(): void {
       label: 'Harness',
       submenu: [
         {
+          label: isChinese ? '打开业务体验（P0）' : 'Open Business Preview (P0)',
+          click: () => {
+            if (businessPreview) void businessPreview.show().catch(showUnexpectedError)
+            else void dialog.showMessageBox({ message: 'No business package. Set DSH_BUSINESS_PACKAGE or export build/business-package first.' })
+          }
+        },
+        {
           label: isChinese ? '连接手机…' : 'Connect Phone…',
           accelerator: 'CmdOrCtrl+Shift+M',
           click: () => void showMobilePairing().catch(showUnexpectedError)
@@ -2678,6 +2688,20 @@ async function showMobilePairing(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  const businessPackage = process.env.DSH_BUSINESS_PACKAGE || desktopResourcePath('business-package')
+  if (existsSync(join(businessPackage, 'manifest.json'))) {
+    const businessDataRoot = join(app.getPath('userData'), 'business')
+    process.env.DSH_BUSINESS_CONNECTION_FILE = join(businessDataRoot, 'connection.json')
+    const businessSource = await ensureBusinessWorkspace(businessPackage, businessDataRoot)
+    businessPreview = new BusinessPreview({
+      packageRoot: businessPackage, sourceRoot: businessSource,
+      entry: desktopResourcePath('business-runtime.mjs'), node: bundledNodePath(),
+      userRoot: join(businessDataRoot, 'user-data'),
+      connectionFile: process.env.DSH_BUSINESS_CONNECTION_FILE,
+      log: text => console.log(`[business] ${text.trimEnd()}`)
+    })
+    try { await businessPreview.start() } catch (error) { console.error('[business] Startup failed:', error) }
+  }
   desktopDiagnostics?.startSending()
   if (process.platform === 'darwin') app.dock?.setIcon(desktopIconPath())
   launchDirectory = await ensureLaunchRoot(app.getPath('userData'))
@@ -2766,6 +2790,19 @@ async function bootstrap(): Promise<void> {
     const errorMessage = await shell.openPath(path)
     if (errorMessage) throw new Error(errorMessage)
     return { ok: true }
+  })
+  ipcMain.removeHandler('business:open-preview')
+  ipcMain.handle('business:open-preview', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    if (!businessPreview) throw new Error('Business preview is not included in this build.')
+    await businessPreview.show()
+    return { ok: true }
+  })
+  ipcMain.removeHandler('business:preview-url')
+  ipcMain.handle('business:preview-url', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    if (!businessPreview) throw new Error('Business preview is not included in this build.')
+    return { url: await businessPreview.embeddedUrl() }
   })
   ipcMain.removeHandler('harness:renderer-healthy')
   ipcMain.handle('harness:renderer-healthy', (event) => {
@@ -2929,6 +2966,7 @@ async function bootstrap(): Promise<void> {
     startUpdateManager({
       prepareToInstall: async () => {
         await runtime.stop()
+        await businessPreview?.stop()
         const dshHome = join(app.getPath('userData'), 'harness')
         await quarantineInstalledLaunchAgentsForUpdate(dshHome)
         quitting = true
@@ -3000,7 +3038,7 @@ if (isDaemonLaunch(process.env, process.platform)) {
       // over it unless it is destroyed explicitly before the process exits.
       if (tray && !tray.isDestroyed()) tray.destroy()
       tray = undefined
-      void Promise.all([runtime.stop(), mobileBridge?.stop()]).finally(() => app.quit())
+      void Promise.all([runtime.stop(), mobileBridge?.stop(), businessPreview?.stop()]).finally(() => app.quit())
     })
   }
 }

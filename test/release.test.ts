@@ -354,6 +354,7 @@ describe('GitHub release contract', () => {
     )
 
     expect(packageJson.scripts['package:dev:dir']).toContain('npm run build')
+    expect(packageJson.scripts['package:dev:dir']).toContain('npm run business:verify')
     expect(packageJson.scripts['package:dev:dir']).toContain('electron-builder.dev.cjs')
     expect(packageJson.scripts['package:dev:mac:arm64']).toContain('verify-target.mjs darwin arm64')
     expect(packageJson.scripts['package:dev:mac:arm64']).toContain('electron-builder.dev.cjs')
@@ -362,6 +363,19 @@ describe('GitHub release contract', () => {
     expect(packageJson.scripts['package:dev:win']).toContain('verify-target.mjs win32 x64')
     expect(packageJson.scripts['package:dev:win']).toContain('electron-builder.dev.cjs')
     expect(packageJson.scripts['package:dev:win']).toContain('--publish never')
+    for (const script of [
+      'package:dir',
+      'package:dev:dir',
+      'package:dev:mac:arm64',
+      'package:dev:mac:x64',
+      'package:dev:win',
+      'package:mac',
+      'package:mac:arm64',
+      'package:mac:x64',
+      'package:win'
+    ]) {
+      expect(packageJson.scripts[script]).toContain('business:verify')
+    }
     expect(developmentConfig).toContain("appId: 'io.dsh.desktop.dev'")
     expect(developmentConfig).toContain("productName: 'DSH Desktop Dev'")
     expect(developmentConfig).toContain("output: 'dist-dev'")

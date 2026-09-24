@@ -305,6 +305,7 @@ export function buildHarnessSpawnOptions(
     cwd: launchDirectory,
     env: {
       ...parentEnvironment,
+      ...(process.env.DSH_BUSINESS_CONNECTION_FILE ? { DSH_BUSINESS_CONNECTION_FILE: process.env.DSH_BUSINESS_CONNECTION_FILE } : {}),
       DSH_HOME: dshHome,
       NO_COLOR: '1',
       // package-import-method/child-concurrency are left at pnpm's defaults

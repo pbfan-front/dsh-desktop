@@ -1,0 +1,29 @@
+{
+  "profiles": [
+    {
+      "id": "desktop_p0_default",
+      "label": "P0：现有三企业场景",
+      "page": "productCombine",
+      "pageLabel": "额度页",
+      "routePath": "/credit/productCombine",
+      "entryPath": "/#/credit/productCombine",
+      "action": "preview",
+      "actionLabel": "P0 切换验证",
+      "branchLabel": "正常返回(3企业2法人)",
+      "apis": { "/refactor/queryMultiEnterpriseListII.json": "正常返回(3企业2法人)" },
+      "notes": ["仅验证已有场景选择、响应命中及预览，不代表核额失败场景。"]
+    },
+    {
+      "id": "desktop_p0_single",
+      "label": "P0：现有单企业场景",
+      "page": "productCombine",
+      "pageLabel": "额度页",
+      "routePath": "/credit/productCombine",
+      "entryPath": "/#/credit/productCombine",
+      "action": "preview",
+      "actionLabel": "P0 切换验证",
+      "branchLabel": "单企业",
+      "apis": { "/refactor/queryMultiEnterpriseListII.json": "单企业" }
+    }
+  ]
+}

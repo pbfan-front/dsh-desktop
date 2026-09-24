@@ -37,20 +37,201 @@ window.__ModuleLoader__.load({
       return React.createElement(FishLogo, props)
     }
 
-    const inject = ['slots']
+    function BusinessSidebarAction(props) {
+      return React.createElement('button', {
+        type: 'button', onClick: () => {
+          let hostWindow = window
+          try { if (window.top?.document) hostWindow = window.top } catch {}
+          if (props?.sessionId) hostWindow.document.documentElement.dataset.dshBusinessSessionId = props.sessionId
+          hostWindow.dispatchEvent(new CustomEvent('dsh-desktop:business-session-change', { detail: { sessionId: props?.sessionId || '' } }))
+          ctxForBusiness.sidebarRight.openTab('business-preview')
+        },
+        title: '在右侧栏中体验业务场景',
+        style: { height: 32, padding: '0 12px', border: '1px solid var(--border, #d7dde8)', borderRadius: 8,
+          background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 13, fontWeight: 500 }
+      }, '侧栏体验')
+    }
+
+    let persistentBusinessFrame
+    let persistentBusinessFrameParking
+
+    function businessFrameParking() {
+      if (persistentBusinessFrameParking?.isConnected) return persistentBusinessFrameParking
+      const parking = document.createElement('div')
+      parking.dataset.dshBusinessPreviewParking = 'true'
+      parking.setAttribute('aria-hidden', 'true')
+      Object.assign(parking.style, { display: 'none' })
+      document.body.appendChild(parking)
+      persistentBusinessFrameParking = parking
+      return parking
+    }
+
+    function businessFrame() {
+      if (persistentBusinessFrame) return persistentBusinessFrame
+      const frame = document.createElement('iframe')
+      frame.title = '业务场景体验'
+      frame.dataset.dshBusinessPreviewPersistent = 'true'
+      Object.assign(frame.style, {
+        display: 'block', width: '100%', height: '100%', border: '0', background: '#f4f7fb'
+      })
+      persistentBusinessFrame = frame
+      businessFrameParking().appendChild(frame)
+      return frame
+    }
+
+    function mountBusinessFrame(container, url) {
+      const frame = businessFrame()
+      let shouldNavigate = frame.dataset.dshBusinessPreviewInitialized !== 'true'
+      if (!shouldNavigate) {
+        try {
+          const current = new URL(frame.src)
+          const next = new URL(url)
+          shouldNavigate = current.origin !== next.origin || current.searchParams.get('__dshSession') !== next.searchParams.get('__dshSession')
+        }
+        catch { shouldNavigate = true }
+      }
+      if (shouldNavigate) {
+        frame.src = url
+        frame.dataset.dshBusinessPreviewInitialized = 'true'
+      }
+      container.appendChild(frame)
+      return () => {
+        if (frame.parentElement === container) businessFrameParking().appendChild(frame)
+      }
+    }
+
+    function BusinessPreviewPanel() {
+      const [state, setState] = React.useState({ url: '', error: '' })
+      const [frameContainer, setFrameContainer] = React.useState(null)
+      React.useEffect(() => {
+        let active = true
+        let timer
+        let retryTimer
+        let hostWindow = window
+        try {
+          // Harness may mount client plugins in a same-origin child frame on
+          // Windows, while Electron's preload bridge lives in the top frame.
+          if (window.top?.document) hostWindow = window.top
+        } catch {}
+        const acceptPublishedUrl = () => {
+          const root = hostWindow.document.documentElement
+          const url = root.dataset.dshBusinessPreviewUrl
+          const error = root.dataset.dshBusinessPreviewError
+          if (url) {
+            try {
+              const parsed = new URL(url)
+              if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
+              if (active) setState({ url: parsed.href, error: '' })
+            } catch (reason) { if (active) setState({ url: '', error: String(reason) }) }
+            return true
+          }
+          if (error) {
+            if (active) setState({ url: '', error })
+            return true
+          }
+          return false
+        }
+        const bridgeFallback = () => {
+          const bridgeRequest = hostWindow.dshDesktop?.businessPreviewUrl?.()
+          if (!bridgeRequest) return false
+          bridgeRequest
+            .then(value => {
+              if (!active) return
+              const parsed = new URL(value.url)
+              if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
+              setState({ url: parsed.href, error: '' })
+            })
+            .catch(error => { if (active && !acceptPublishedUrl()) setState({ url: '', error: String(error) }) })
+          return true
+        }
+        const requestMainProcessRecovery = () => {
+          try {
+            hostWindow.dispatchEvent(new Event('dsh-desktop:business-preview-request'))
+            return true
+          } catch {
+            return false
+          }
+        }
+        const discover = () => {
+          const sessionId = hostWindow.document.documentElement.dataset.dshBusinessSessionId || ''
+          fetch(`/api/dsh-desktop/business-preview${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`, { cache: 'no-store', credentials: 'same-origin' })
+            .then(async response => {
+              const value = await response.json()
+              if (!response.ok) throw new Error(value.error || `HTTP ${response.status}`)
+              if (!active) return
+              const parsed = new URL(value.url)
+              if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
+              setState({ url: parsed.href, error: '' })
+            })
+            .catch(() => {
+              if (!active) return
+              if (!acceptPublishedUrl()) {
+                bridgeFallback()
+                requestMainProcessRecovery()
+              }
+              retryTimer = window.setTimeout(discover, 1000)
+            })
+        }
+        discover()
+        const handleSessionChange = () => discover()
+        hostWindow.addEventListener('dsh-desktop:business-session-change', handleSessionChange)
+        if (!acceptPublishedUrl()) {
+          hostWindow.addEventListener('dsh-desktop:business-preview-ready', acceptPublishedUrl)
+          timer = window.setTimeout(() => {
+            if (active && !acceptPublishedUrl()) requestMainProcessRecovery()
+          }, 5000)
+        }
+        return () => {
+          active = false
+          hostWindow.removeEventListener('dsh-desktop:business-session-change', handleSessionChange)
+          hostWindow.removeEventListener('dsh-desktop:business-preview-ready', acceptPublishedUrl)
+          if (timer) window.clearTimeout(timer)
+          if (retryTimer) window.clearTimeout(retryTimer)
+        }
+      }, [])
+      React.useEffect(() => {
+        if (!frameContainer || !state.url) return undefined
+        return mountBusinessFrame(frameContainer, state.url)
+      }, [frameContainer, state.url])
+      if (state.error) return React.createElement('div', { style: { padding: 20, color: '#b42318' } }, `业务预览加载失败：${state.error}`)
+      if (!state.url) return React.createElement('div', { style: { padding: 20, color: '#667085' } }, '正在加载业务预览…')
+      return React.createElement('div', { ref: setFrameContainer,
+        'data-dsh-business-preview-container': true,
+        style: { width: '100%', height: '100%', minHeight: 0 } })
+    }
+
+    let ctxForBusiness
+
+    const inject = ['slots', 'sidebarRight', 'sidebarRightTabs']
     function apply(ctx) {
-      ctx.slots.inject('sidebar.brand.mark', () =>
-        ctx.slots.inject('sidebar.brand.name', () =>
-          ctx.slots.inject('conversation.hero.brand.mark', function* () {
+      ctxForBusiness = ctx
+      ctx.effect(() => ctx.sidebarRightTabs.register({
+        id: 'dsh-desktop-business-preview', kind: 'business-preview',
+        title: () => '业务体验',
+        guide: [{ order: 20, title: () => '业务体验', description: () => '在侧边栏中预览并切换业务 Mock 场景' }]
+      }), 'dsh-desktop: business preview tab')
+      ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
+        { name: 'sidebar.right.pane.tab', key: 'dsh-desktop-business-preview' },
+        BusinessPreviewPanel
+      )), 'dsh-desktop: business preview body')
+      ctx.slots.inject('sidebar.brand.mark', () => {
+        return ctx.slots.inject('sidebar.brand.name', () => {
+          return ctx.slots.inject('conversation.hero.brand.mark', () => {
+            return ctx.slots.inject('conversation.session.header.actions', function* () {
             yield ctx.slots.register({ name: 'sidebar.brand.mark' }, DesktopBrandMark)
             yield ctx.slots.register({ name: 'sidebar.brand.name' }, DesktopBrandName)
             yield ctx.slots.register(
               { name: 'conversation.hero.brand.mark' },
               ConversationBrandMark
             )
+            yield ctx.slots.register(
+              { name: 'conversation.session.header.actions', id: 'business-sidebar-preview', order: 81, label: '侧栏体验' },
+              BusinessSidebarAction
+            )
+            })
           })
-        )
-      )
+        })
+      })
     }
 
     exports.apply = apply
