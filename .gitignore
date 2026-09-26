@@ -1,5 +1,10 @@
 node_modules/
 build/business-package*/
+build/business-dev-user-data/
+build/connection.json
+build/workspace/
+build/.workspace-staging-*/
+build/.workspace-previous-*/
 out/
 dist/
 dist-dev/
