@@ -23,6 +23,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   userRoot = resolve(userRoot || process.env.DSH_BUSINESS_USER_ROOT || join(packageRoot, '.user-data'))
   await mkdir(userRoot, { recursive: true })
   if (!/^\/[a-zA-Z0-9_-]+\/$/.test(manifest.businessPath)) throw new Error('Invalid business entry path')
+  const configuredAppUrl = process.env.DSH_BUSINESS_APP_URL
+  let developmentAppUrl
+  if (configuredAppUrl) {
+    const candidate = new URL(configuredAppUrl)
+    if (candidate.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(candidate.hostname) || candidate.username || candidate.password) {
+      throw new Error('DSH_BUSINESS_APP_URL must be an unauthenticated loopback HTTP URL')
+    }
+    developmentAppUrl = candidate.href
+  }
   const web = await within(packageRoot, manifest.webRoot)
   const platform = await within(packageRoot, manifest.platformRoot)
   const require = createRequire(join(platform, 'package.json'))
@@ -251,7 +260,12 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const defaultSessionId = 'default'
   const sessionStates = new Map()
   const pageObservations = new Map()
-  const initialState = () => ({ revision: 0, profileId: '', url: `${manifest.businessPath}#${manifest.entryRoute}`, verified: false })
+  const businessAppUrl = route => {
+    const target = new URL(developmentAppUrl || `${origin}${manifest.businessPath}`)
+    target.hash = route
+    return target.href
+  }
+  const initialState = () => ({ revision: 0, profileId: '', url: businessAppUrl(manifest.entryRoute), verified: false })
   const safeSessionId = value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,200}$/.test(value) ? value : defaultSessionId
   const cookieValue = (req, name) => String(req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith(`${name}=`))?.slice(name.length + 1)
   const requestSessionId = (req, url) => safeSessionId(req.headers['x-dsh-session'] || url.searchParams.get('__dshSession') || decodeURIComponent(cookieValue(req, 'dsh_business_session') || ''))
@@ -402,7 +416,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           }
           const route = profile.routePath || profile.entryPath?.replace(/^\/?#/, '') || manifest.entryRoute
           if (!route.startsWith('/') || route.startsWith('//')) return respond(res, 422, { error: 'Invalid profile route' })
-          state = { revision: state.revision + 1, profileId, url: `${manifest.businessPath}?__mockProfile=${encodeURIComponent(profileId)}&__dshSession=${encodeURIComponent(sessionId)}#${route}`, verified: false }
+          const target = new URL(businessAppUrl(route))
+          target.searchParams.set('__mockProfile', profileId)
+          target.searchParams.set('__dshSession', sessionId)
+          state = { revision: state.revision + 1, profileId, url: target.href, verified: false }
           sessionStates.set(sessionId, state)
           pageObservations.delete(sessionId)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
@@ -411,7 +428,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         return respond(res, 404, { error: 'Unknown desktop command' })
       }
       if (url.pathname === '/api/profiles' && req.method === 'GET') {
-        return respond(res, 200, { profiles: await profileSummaries(), operationMaps: [], entryUrl: `${origin}${manifest.businessPath}` })
+        return respond(res, 200, { profiles: await profileSummaries(), operationMaps: [], entryUrl: developmentAppUrl || `${origin}${manifest.businessPath}` })
       }
       // P0 explicitly allows only preview reads and non-persistent switching.
       // Existing platform Agent/write routes are not reachable in the desktop prototype.
@@ -460,7 +477,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   await new Promise((done, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', done) })
   origin = `http://127.0.0.1:${server.address().port}`
   process.env.MOCK_PLATFORM_PROJECT_ROOT = source
-  process.env.MOCK_PLATFORM_APP_URL = `${origin}${manifest.businessPath}`
+  process.env.MOCK_PLATFORM_APP_URL = developmentAppUrl || `${origin}${manifest.businessPath}`
   process.env.MOCK_PLATFORM_APP_PATH = manifest.businessPath
   process.env.MOCK_PLATFORM_USE_PROFILE_SESSION = '1'
   process.env.NODE_ENV = 'production'

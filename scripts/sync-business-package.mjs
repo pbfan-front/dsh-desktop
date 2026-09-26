@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { access, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createBusinessBuildPlan } from './business-sync-plan.mjs'
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const businessRoot = resolve(process.env.DSH_BUSINESS_PROJECT || join(desktopRoot, '..', 'demo-test'))
@@ -9,17 +10,25 @@ const webRoot = resolve(process.env.DSH_BUSINESS_WEB_ROOT || join(businessRoot, 
 const destination = join(desktopRoot, 'build', 'business-package')
 const stage = `${destination}.next-${process.pid}`
 const previous = `${destination}.previous-${process.pid}`
+const exportOnly = process.argv.includes('--export-only')
 
-const run = (command, args, cwd) => {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', env: process.env })
+const run = (command, args, cwd, extraEnv = {}) => {
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', env: { ...process.env, ...extraEnv } })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with exit code ${result.status}`)
 }
 
 await access(join(businessRoot, 'mock-platform', 'package.json'))
+if (!exportOnly) {
+  for (const step of createBusinessBuildPlan({ businessRoot, webRoot })) {
+    console.log(`\n[business:sync] ${step.label}`)
+    run(step.command, step.args, step.cwd, step.env)
+  }
+} else {
+  console.log('[business:sync] export-only mode: reusing prebuilt web, index and mock platform outputs')
+}
 await access(join(webRoot, 'mm2606290', 'index.html'))
 await rm(stage, { recursive: true, force: true })
-run('npm', ['run', 'build'], join(businessRoot, 'mock-platform'))
 run(process.execPath, [join(desktopRoot, 'scripts', 'export-business-package.mjs'), businessRoot, stage, webRoot], desktopRoot)
 
 let movedPrevious = false

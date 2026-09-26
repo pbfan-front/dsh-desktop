@@ -14,11 +14,13 @@ P1 已提供独立用户场景目录，以及分析、创建、应用、验证�
 
 ## 生成业务包
 
-Desktop 仓库提供一条完整同步命令。它会构建 `mock-platform`、原子替换业务包并立即校验清单：
+Desktop 仓库提供一条完整同步命令。它会刷新生成路由、编译并更新 CodeIntell 索引、编译 local-mock 业务 Web、构建 `mock-platform`，然后原子替换业务包并立即校验清单：
 
 ```bash
 npm run business:sync
 ```
+
+仅在上述产物已由同一受信流水线生成时，才可使用 `npm run business:export` 跳过重新构建并执行原子导出。日常开发不应使用该命令。
 
 默认业务仓库是相邻的 `../demo-test`，可通过 `DSH_BUSINESS_PROJECT` 和 `DSH_BUSINESS_WEB_ROOT` 覆盖。导出清单记录业务提交、平台 BUILD_ID、平台页面源码、全部业务源码、业务 Web 入口和 CodeIntell 索引摘要。
 
@@ -40,6 +42,14 @@ npm run business:accept
 npx vitest run test/business-plugin.test.ts test/runtime.test.ts
 node scripts/test-business-runtime.mjs build/business-package
 ```
+
+日常业务页面联调使用：
+
+```bash
+npm run dev:business
+```
+
+该命令同时启动 `demo-test` 的 local-mock dev server 和 Desktop 源码开发进程。侧栏仍由 Desktop 业务运行时管理 Profile 和证据，内部业务 iframe 改为加载 dev server，业务源码保存后可热更新。开发 Mock 数据写入 `build/business-dev-user-data`，不与安装版用户数据混用。
 
 `business:accept` 使用临时用户目录验收两个真实业务基准：借据列表“借据状态正常”和额度页“核额失败”。它要求 CodeIntell 自动识别目标 API，随后创建并应用临时 Profile，检查 Mock 命中头及关键业务字段，最后回滚全部写入。
 

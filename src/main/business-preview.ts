@@ -9,7 +9,7 @@ export class BusinessPreview {
   private window?: BrowserWindow
   private starting?: Promise<string>
   private origin?: string
-  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; log: (text: string) => void }) {}
+  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; developmentAppUrl?: string; log: (text: string) => void }) {}
 
   async start(): Promise<string> {
     if (this.origin) return this.origin
@@ -31,10 +31,13 @@ export class BusinessPreview {
       return new Error(detail ? `${message}: ${detail}` : message)
     }
     await mkdir(dirname(this.options.connectionFile), { recursive: true })
+    const childEnv = { ...process.env }
+    delete childEnv.DSH_BUSINESS_APP_URL
+    if (this.options.developmentAppUrl) childEnv.DSH_BUSINESS_APP_URL = this.options.developmentAppUrl
     const child = fork(this.options.entry, [this.options.packageRoot], {
       execPath: this.options.node, execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
-        ...process.env,
+        ...childEnv,
         DSH_BUSINESS_TOKEN: token,
         DSH_BUSINESS_SOURCE_ROOT: this.options.sourceRoot,
         DSH_BUSINESS_USER_ROOT: this.options.userRoot

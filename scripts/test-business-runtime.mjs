@@ -21,7 +21,7 @@ try {
     child.once('error', error => { clearTimeout(timer); reject(error) })
     child.once('exit', code => { clearTimeout(timer); reject(new Error(`Exited ${code}`)) })
   })
-  const get = (path, options = {}) => fetch(`${ready.origin}${path}`, options)
+  const get = (path, options = {}) => fetch(new URL(path, ready.origin), options)
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
   assert.equal((await get('/__desktop/profiles')).status, 401)
   assert.equal((await get('/__desktop/state', { headers: { Origin: 'https://example.com' } })).status, 403)

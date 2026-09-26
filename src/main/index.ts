@@ -4,7 +4,7 @@ import { ensureBusinessWorkspace } from './business-workspace'
 import { checkBlockingPluginUpdates, selectPluginRecoveryTarget, PluginRecoveryEvidence, planPluginRecovery, runPluginRecoveryPlan, type PluginRecoveryCheck } from './plugin-recovery-market'
 import { RepairAgentService, type CrashEvidence } from './repair-agent'
 import { spawn } from 'node:child_process'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { parse } from 'yaml'
@@ -3352,13 +3352,19 @@ async function showMobilePairing(): Promise<void> {
 async function bootstrap(): Promise<void> {
   const businessPackage = process.env.DSH_BUSINESS_PACKAGE || desktopResourcePath('business-package')
   if (existsSync(join(businessPackage, 'manifest.json'))) {
-    const businessDataRoot = join(app.getPath('userData'), 'business')
+    const configuredBusinessUserRoot = !app.isPackaged && process.env.DSH_BUSINESS_USER_ROOT
+      ? resolve(process.env.DSH_BUSINESS_USER_ROOT)
+      : undefined
+    const businessDataRoot = configuredBusinessUserRoot
+      ? join(configuredBusinessUserRoot, '..')
+      : join(app.getPath('userData'), 'business')
     process.env.DSH_BUSINESS_CONNECTION_FILE = join(businessDataRoot, 'connection.json')
     const businessSource = await ensureBusinessWorkspace(businessPackage, businessDataRoot)
     businessPreview = new BusinessPreview({
       packageRoot: businessPackage, sourceRoot: businessSource,
       entry: desktopResourcePath('business-runtime.mjs'), node: bundledNodePath(),
-      userRoot: join(businessDataRoot, 'user-data'),
+      userRoot: configuredBusinessUserRoot || join(businessDataRoot, 'user-data'),
+      developmentAppUrl: !app.isPackaged ? process.env.DSH_BUSINESS_APP_URL : undefined,
       connectionFile: process.env.DSH_BUSINESS_CONNECTION_FILE,
       log: text => console.log(`[business] ${text.trimEnd()}`)
     })
