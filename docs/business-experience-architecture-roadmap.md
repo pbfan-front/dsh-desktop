@@ -229,7 +229,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 |---|---|---|---|---|---|---|
 | BEA-001 | P0 | 统一业务构建流水线 | 已完成 | Codex | - | 完整流程已验收，Build ID `3dbb95619672-working-1790385376828` |
 | BEA-002 | P0 | 侧栏业务页面热更新 | 已完成 | Codex | - | `dev:business`、IPv4 回环连接、开发产物隔离及真实 GUI/HMR 均已验收 |
-| BEA-003 | P0 | 外部能力 Mock Adapter | 待开始 | - | - | KYC 已有局部 local-mock 处理 |
+| BEA-003 | P0 | 外部能力 Mock Adapter | 进行中 | Codex | - | 统一契约已建立，KYC 刷脸/视频完成首批迁移；待 Profile 注入与真实 GUI 验收 |
 | BEA-004 | P0 | 缺失 API Mock 受控补全 | 待开始 | - | - | 需复用 Req/Rsp 类型和证据 ID |
 | BEA-005 | P0 | 核心业务 E2E 验收集 | 进行中 | - | - | 已有 2 个基准场景 |
 | BEA-006 | P1 | 用户 Mock 数据版本与迁移 | 待开始 | - | - | - |
@@ -250,6 +250,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |
 | 2026-09-26 | 补齐 BEA-002 开发产物隔离 | 忽略 `build/workspace`、开发用户数据、连接文件及原子替换临时目录，避免数千个生成文件进入 Git，连接令牌不再出现在 Source Control |
 | 2026-09-26 | 完成 BEA-002 真实 GUI/HMR 验收 | Local Mock 固定监听 `127.0.0.1:8094` 后侧栏正常连接；修改业务 Vue 文案可自动更新，无需重启 Desktop 或重建业务包 |
+| 2026-09-26 | 启动 BEA-003 外部能力 Mock Adapter | 建立 Native/Local Mock 双 Adapter 和 success/failure/cancel/timeout 结果契约，KYC 刷脸与视频不再直接判断 `local-mock` |
 | 2026-09-24 | KYC local-mock 流程适配 | 旧架构 FaceId API 无通用 Mock，local-mock 在前置请求前进入成功回调页 |
 | 2026-09-24 | 发现 `business:sync` 不编译业务 Web | 需在 BEA-001 中彻底解决，避免同步旧 `.desktop-build/web` |
 
