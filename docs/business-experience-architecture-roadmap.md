@@ -7,6 +7,8 @@
 > 业务工程：`/Users/pbfan/work/ai/demo-test`
 > Desktop 工程：`/Users/pbfan/work/ai/dsh-desktop`
 
+官方仓库更新与 `dsh_bus` 合并操作见 [DSH Desktop 官方仓库同步操作手册](upstream-sync-workflow.md)。
+
 ## 1. 建设目标
 
 业务人员无需本地代码、Node.js 或 `npm install`，即可在 DSH Desktop 中：
