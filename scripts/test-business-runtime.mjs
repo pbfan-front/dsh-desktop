@@ -2,11 +2,20 @@ import { fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 const token = randomBytes(32).toString('hex')
 const userRoot = await mkdtemp(resolve(tmpdir(), 'dsh-business-user-'))
+const legacyProfileDir = resolve(userRoot, 'src/baseTypes/api')
+const legacyMockDir = resolve(legacyProfileDir, 'refactor/queryMultiEnterpriseListII')
+await mkdir(legacyMockDir, { recursive: true })
+await writeFile(resolve(legacyProfileDir, 'mock-profiles.json'), JSON.stringify({ version: 1, profiles: [{
+  id: 'legacy_profile', label: 'Legacy profile', page: 'productCombine', routePath: '/credit/productCombine',
+  apis: { '/refactor/queryMultiEnterpriseListII.json': 'legacy_scenario' }
+}] }))
+await writeFile(resolve(legacyMockDir, 'mock.json'), JSON.stringify({ label: 'legacy', baseData: { status: '0', msg: 'ok', data: { array: [] } },
+  scenarios: [{ id: 'legacy_scenario', label: 'Legacy scenario', data: { status: '0', msg: 'ok', data: { array: [] } } }] }))
 const child = fork(resolve('build/business-runtime.mjs'), [resolve(process.argv[2] || 'build/business-package')], {
   execPath: resolve('node_modules/node/bin/node'), execArgv: [],
   env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
@@ -28,6 +37,14 @@ try {
   assert.equal((await get('/api/agent/mock', { method: 'POST' })).status, 403)
   const context = await (await get('/__desktop/context', { headers })).json()
   assert.ok(context.sourceRoot.startsWith(resolve('build/business-package')))
+  assert.equal(context.userData.schemaVersion, 2)
+  assert.equal(context.userData.migrated, true)
+  assert.match(context.userData.operationId, /^[0-9a-f-]{36}$/)
+  assert.equal(context.codeIntell.state, 'ready', JSON.stringify(context.codeIntell))
+  assert.equal(context.codeIntell.fresh, true)
+  assert.ok(context.codeIntell.coverage.routes > 0)
+  const codeIntellStatus = await (await get('/__desktop/code-intell/status', { headers })).json()
+  assert.equal(codeIntellStatus.state, 'ready', JSON.stringify(codeIntellStatus))
   const page = await get('/?desktop=1'); assert.equal(page.status, 200)
   const frame = await get(context.state.url.split('#')[0]); assert.equal(frame.status, 200)
   const catalogResponse = await get('/api/profiles')
@@ -41,6 +58,29 @@ try {
   assert.equal(receiptAnalysisResponse.status, 200, JSON.stringify(receiptAnalysis))
   assert.equal(receiptAnalysis.route.path, '/repay/receiptList')
   assert.ok(receiptAnalysis.apis.some(item => item.apiUrl === '/loanNbr/loanNbr.json'), JSON.stringify(receiptAnalysis).slice(0, 4000))
+  const unsupportedExplicit = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
+    routePath: '/credit/productCombine', query: '不存在的接口', apiUrls: ['/missing/notFound.json']
+  }) })
+  assert.equal(unsupportedExplicit.status, 422)
+  assert.match((await unsupportedExplicit.json()).error, /lacks CodeIntell\/source evidence/)
+  const firstMockAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
+    routePath: '/face/home', query: 'KYC 刷脸', apiUrls: ['/cloudiii/getKycFaceId.json']
+  }) })
+  const firstMockAnalysis = await firstMockAnalysisResponse.json()
+  assert.equal(firstMockAnalysisResponse.status, 200, JSON.stringify(firstMockAnalysis))
+  const missingMockApi = firstMockAnalysis.apis.find(item => item.apiUrl === '/cloudiii/getKycFaceId.json')
+  assert.equal(missingMockApi?.mockExists, false, JSON.stringify(missingMockApi))
+  assert.equal(missingMockApi?.canGenerate, true, JSON.stringify(missingMockApi))
+  assert.match(missingMockApi?.typeEvidence?.response || '', /Rsp\.ts$/)
+  const firstMockResponse = await get('/__desktop/create-profile', { method: 'POST', headers, body: JSON.stringify({
+    evidenceId: firstMockAnalysis.evidenceId,
+    profile: { id: 'generated_first_mock', label: 'Generated first mock', page: 'face', routePath: '/face/home' },
+    scenarios: [{ id: 'generated_success', apiUrl: '/cloudiii/getKycFaceId.json', data: { data: {} } }]
+  }) })
+  const firstMockCreated = await firstMockResponse.json()
+  assert.equal(firstMockResponse.status, 201, JSON.stringify(firstMockCreated))
+  assert.equal(firstMockCreated.validation?.requests?.[0]?.scenarioId, 'generated_success')
+  assert.equal((await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: firstMockCreated.operationId }) })).status, 200)
   const analysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({ routePath: '/credit/productCombine', query: '企业额度', apiUrls: ['/refactor/queryMultiEnterpriseListII.json'] }) })
   const analysis = await analysisResponse.json()
   assert.equal(analysisResponse.status, 200, JSON.stringify(analysis))
@@ -94,6 +134,22 @@ try {
   const userSummary = refreshedCatalog.profiles.find(item => item.id === 'p1_user_test')
   assert.equal(userSummary?.ok, true, JSON.stringify(userSummary))
   assert.equal(userSummary?.apis?.[0]?.scenarioId, 'p1_normal')
+  const userDataStatus = await (await get('/__desktop/user-data/status', { headers })).json()
+  assert.equal(userDataStatus.schemaVersion, 2)
+  assert.match(userDataStatus.persistence, /Preserved across upgrades/)
+  const exported = await (await get('/__desktop/user-data/export', { headers })).json()
+  assert.equal(exported.kind, 'dsh-business-user-mocks')
+  assert.equal(exported.schemaVersion, 2)
+  assert.ok(exported.profiles.some(item => item.id === 'p1_user_test'))
+  assert.ok(exported.mocks['/refactor/queryMultiEnterpriseListII.json'])
+  const collisionImport = await get('/__desktop/user-data/import', { method: 'POST', headers, body: JSON.stringify({ package: exported }) })
+  assert.equal(collisionImport.status, 409)
+  assert.equal((await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: created.operationId }) })).status, 200)
+  const importedResponse = await get('/__desktop/user-data/import', { method: 'POST', headers, body: JSON.stringify({ package: exported, replaceExisting: true }) })
+  const imported = await importedResponse.json()
+  assert.equal(importedResponse.status, 201, JSON.stringify(imported))
+  assert.deepEqual(new Set(imported.importedProfiles), new Set(['legacy_profile', 'p1_user_test']))
+  assert.ok((await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
   assert.equal((await get('/__desktop/apply', { method: 'POST', headers, body: JSON.stringify({ profileId: 'p1_user_test' }) })).status, 200)
   const userMock = await get('/mock/refactor/queryMultiEnterpriseListII.json', { method: 'POST', body: '{}' })
   const userPayload = await userMock.json()
@@ -124,7 +180,14 @@ try {
   const verified = await verifiedResponse.json()
   assert.equal(verifiedResponse.status, 200, JSON.stringify(verified))
   assert.equal(verified.verified, true)
-  const rolledBack = await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: created.operationId }) })
+  const scenarioResult = await (await get('/__desktop/result', { headers })).json()
+  assert.equal(scenarioResult.status, 'verified', JSON.stringify(scenarioResult))
+  assert.equal(scenarioResult.stages.created.passed, true)
+  assert.equal(scenarioResult.stages.applied.passed, true)
+  assert.equal(scenarioResult.stages.requestHit.passed, true)
+  assert.equal(scenarioResult.stages.verified.passed, true)
+  assert.ok(scenarioResult.apiBindings.some(item => item.apiUrl === '/refactor/queryMultiEnterpriseListII.json' && item.hit))
+  const rolledBack = await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: imported.operationId }) })
   assert.equal(rolledBack.status, 200)
   assert.ok(!(await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
   console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId, apiBindingsVerified: checked + 1, browserOutcomeVerified: true }))

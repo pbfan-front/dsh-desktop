@@ -38,6 +38,10 @@ const ABOUT_ROOT_ID = 'dsh-desktop-about-root'
 interface AboutInfo {
   desktopVersion: string
   harnessVersion: string
+  businessBuildId: string
+  businessPackageVersion: string
+  channel: 'development' | 'production'
+  platform: string
   locale: 'en' | 'zh'
 }
 let aboutHost: HTMLElement | null = null
@@ -384,18 +388,31 @@ async function publishBusinessPreviewUrl(): Promise<void> {
     const value = (await ipcRenderer.invoke('business:preview-url')) as { url?: unknown }
     if (typeof value.url !== 'string') throw new Error('Business preview returned no URL.')
     document.documentElement.dataset.dshBusinessPreviewUrl = value.url
+    document.documentElement.dataset.dshBusinessPreviewState = 'ready'
     delete document.documentElement.dataset.dshBusinessPreviewError
   } catch (error) {
     // Keep the last known-good loopback URL while the main process restarts the
     // business service. Clearing it creates a race whenever the right panel is
     // remounted during a Harness render/update.
     if (!document.documentElement.dataset.dshBusinessPreviewUrl) {
+      document.documentElement.dataset.dshBusinessPreviewState = 'failed'
       document.documentElement.dataset.dshBusinessPreviewError = error instanceof Error ? error.message : String(error)
     }
   } finally {
     window.dispatchEvent(new Event(BUSINESS_PREVIEW_READY_EVENT))
   }
 }
+
+ipcRenderer.on('business:preview-state', (_event, state: { phase?: string; kind?: string; error?: string }) => {
+  const phase = typeof state?.phase === 'string' ? state.phase : 'failed'
+  document.documentElement.dataset.dshBusinessPreviewState = phase
+  if (state?.kind) document.documentElement.dataset.dshBusinessPreviewFailureKind = state.kind
+  else delete document.documentElement.dataset.dshBusinessPreviewFailureKind
+  if (state?.error) document.documentElement.dataset.dshBusinessPreviewRuntimeError = state.error
+  else delete document.documentElement.dataset.dshBusinessPreviewRuntimeError
+  if (phase === 'ready') void publishBusinessPreviewUrl()
+  else window.dispatchEvent(new Event(BUSINESS_PREVIEW_READY_EVENT))
+})
 
 window.addEventListener(BUSINESS_PREVIEW_REQUEST_EVENT, () => {
   void publishBusinessPreviewUrl()
@@ -577,7 +594,10 @@ contextBridge.exposeInMainWorld(
     uninstallMarket: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('market:uninstall'),
     openInFinder: (path: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('harness:open-in-finder', path),
     openBusinessPreview: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('business:open-preview'),
-    businessPreviewUrl: (): Promise<{ url: string }> => ipcRenderer.invoke('business:preview-url')
+    businessPreviewUrl: (): Promise<{ url: string }> => ipcRenderer.invoke('business:preview-url'),
+    businessPreviewStatus: (): Promise<{ phase: string; attempt: number; error?: string }> => ipcRenderer.invoke('business:preview-status'),
+    restartBusinessPreview: (): Promise<{ ok: boolean; url: string }> => ipcRenderer.invoke('business:restart-preview'),
+    showHarnessLog: (): Promise<void> => ipcRenderer.invoke('harness:show-log')
   })
 )
 
@@ -910,8 +930,24 @@ function renderAbout(): void {
   body.appendChild(line1)
 
   const line2 = element('p', 'about-line')
-  line2.textContent = `${zh ? '内置 Harness 版本： ' : 'Bundled Harness version: '}${info.harnessVersion}`
+  line2.textContent = `${zh ? '发布通道： ' : 'Release channel: '}${info.channel}`
   body.appendChild(line2)
+
+  const line3 = element('p', 'about-line')
+  line3.textContent = `${zh ? '运行平台： ' : 'Platform: '}${info.platform}`
+  body.appendChild(line3)
+
+  const line4 = element('p', 'about-line')
+  line4.textContent = `${zh ? '业务包版本： ' : 'Business package version: '}${info.businessPackageVersion}`
+  body.appendChild(line4)
+
+  const line5 = element('p', 'about-line')
+  line5.textContent = `${zh ? '业务 Build ID： ' : 'Business Build ID: '}${info.businessBuildId}`
+  body.appendChild(line5)
+
+  const line6 = element('p', 'about-line')
+  line6.textContent = `${zh ? '内置 Harness 版本： ' : 'Bundled Harness version: '}${info.harnessVersion}`
+  body.appendChild(line6)
 
   const hint = element('p', 'about-hint')
   hint.textContent = zh ? 'Harness 随 DSH Desktop 更新。' : 'Harness is updated with DSH Desktop.'

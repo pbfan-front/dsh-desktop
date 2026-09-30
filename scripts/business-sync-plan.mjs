@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-export function createBusinessBuildPlan({ businessRoot, webRoot, nodeExecutable = process.execPath }) {
+export function createBusinessBuildPlan({ businessRoot, webRoot, desktopRoot, nodeExecutable = process.execPath }) {
   return [
     {
       label: 'refresh generated routes',
@@ -20,6 +20,12 @@ export function createBusinessBuildPlan({ businessRoot, webRoot, nodeExecutable 
       args: ['run', 'code-intell:index'],
       cwd: businessRoot
     },
+    ...(desktopRoot ? [{
+      label: 'write CodeIntell lifecycle metadata',
+      command: nodeExecutable,
+      args: [join(desktopRoot, 'scripts', 'code-intell-lifecycle.mjs'), businessRoot],
+      cwd: desktopRoot
+    }] : []),
     {
       label: 'build local-mock business web',
       command: nodeExecutable,

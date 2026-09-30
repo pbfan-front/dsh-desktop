@@ -24,9 +24,20 @@ describe('business Harness plugin', () => {
       expect(routes).toHaveLength(1)
       expect(routes[0]).toMatchObject({ kind: 'exact', path: '/api/dsh-desktop/business-preview' })
       expect(definitions.map(tool => tool.name)).toEqual([
-        'business_context', 'business_analyze_target', 'business_list_profiles', 'business_preview_evidence', 'business_verify_preview', 'business_apply_profile', 'business_create_profile', 'business_rollback'
+        'business_context', 'business_code_intell_status', 'business_user_data_status', 'business_export_scenarios', 'business_import_scenarios',
+        'business_analyze_target', 'business_list_profiles', 'business_preview_evidence', 'business_scenario_result', 'business_verify_preview',
+        'business_apply_profile', 'business_create_profile', 'business_rollback'
       ])
       expect(definitions.every(tool => typeof tool.execute === 'function')).toBe(true)
+      const importTool = definitions.find(tool => tool.name === 'business_import_scenarios')
+      expect(importTool.parameters).toMatchObject({
+        type: 'object',
+        properties: {
+          packageJson: { type: 'string' },
+          replaceExisting: { type: 'boolean' },
+        },
+        required: ['packageJson'],
+      })
     } finally {
       if (old === undefined) delete process.env.DSH_BUSINESS_CONNECTION_FILE
       else process.env.DSH_BUSINESS_CONNECTION_FILE = old

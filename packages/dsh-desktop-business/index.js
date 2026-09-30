@@ -34,8 +34,10 @@ export async function apply(ctx) {
         const sessionId = requestUrl.searchParams.get('sessionId') || ''
         const previewUrl = new URL(`${value.origin}/?desktop=1&embedded=1`)
         if (sessionId) previewUrl.searchParams.set('__dshSession', sessionId)
+        const statusResponse = await fetch(`${value.origin}/__desktop/code-intell/status`, { headers: { Authorization: `Bearer ${value.token}` } })
+        const codeIntell = statusResponse.ok ? await statusResponse.json() : { state: 'unavailable', fresh: false, error: `HTTP ${statusResponse.status}` }
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-        res.end(JSON.stringify({ url: previewUrl.href }))
+        res.end(JSON.stringify({ url: previewUrl.href, codeIntell }))
       } catch (error) {
         res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
@@ -43,21 +45,29 @@ export async function apply(ctx) {
     }
   }), 'dsh-desktop-business: preview discovery route')
   const specs = [
-    ['business_context', 'Get the packaged business project, read-only source workspace, writable user Mock root, version and current preview state.', '/__desktop/context', {}, args => args],
-    ['business_analyze_target', 'Required read-only preflight before business_create_profile. Resolve an exact business route through CodeIntell, return page/source evidence, candidate APIs, response envelope fields, business fields and existing Scenario IDs. Use apiUrlsJson only to validate API URLs already supported by source evidence; do not guess them. Preserve the returned evidenceId for creation.', '/__desktop/analyze-target', {
+    ['business_context', 'Get the packaged business project, read-only source workspace, writable user Mock root, version, CodeIntell health and current preview state.', '/__desktop/context', {}, args => args],
+    ['business_code_intell_status', 'Inspect CodeIntell index version, freshness, compatibility, coverage and the latest load error. Check this when source evidence is missing or scenario analysis fails.', '/__desktop/code-intell/status', {}, args => args],
+    ['business_user_data_status', 'Inspect the user Mock schema version, latest startup migration, compatibility conflicts, rollback operation and persistence location before applying or moving scenarios.', '/__desktop/user-data/status', {}, args => args],
+    ['business_export_scenarios', 'Export every user-owned Profile and Scenario as a versioned, portable JSON package. The package contains Mock data only, never credentials, sessions or source files.', '/__desktop/user-data/export', {}, args => args],
+    ['business_import_scenarios', 'Import a versioned user Mock JSON package for this exact business project. Existing Profile IDs are rejected unless replaceExisting is true. The import is atomic, validates all bindings and returns an operationId for rollback.', '/__desktop/user-data/import', {
+      packageJson: { type: 'string', required: true, description: 'Exact JSON object returned by business_export_scenarios.' },
+      replaceExisting: { type: 'boolean', description: 'Replace user Profiles with matching IDs. Defaults to false.' }
+    }, args => ({ package: JSON.parse(args.packageJson), replaceExisting: args.replaceExisting === true })],
+    ['business_analyze_target', 'Required read-only preflight before business_create_profile. Resolve an exact business route through CodeIntell, return page/source evidence, candidate APIs, response envelope fields, business fields and existing Scenario IDs. An API with no mock.json is marked mockExists=false only when a usable Rsp.ts permits controlled first-Mock creation. apiUrlsJson may only prioritize APIs already supported by source evidence; unsupported URLs are rejected. Preserve the returned evidenceId for creation.', '/__desktop/analyze-target', {
       routePath: { type: 'string', required: true, description: 'Exact business hash route, for example /repay/receiptList.' },
       query: { type: 'string', required: true, description: 'Business scenario keywords used to rank APIs and existing scenarios.' },
       apiUrlsJson: { type: 'string', description: 'Optional JSON string array of exact API URLs already found in source evidence.' }
     }, args => ({ routePath: args.routePath, query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
     ['business_list_profiles', 'List packaged and user-created business Mock Profiles and their API bindings. Use exact IDs when applying a scenario.', '/__desktop/profiles', {}, args => args],
     ['business_preview_evidence', 'Read up to 100 recent Mock requests from the preview, including the actually matched Profile and scenario IDs. Use this after applying a Profile; request evidence still does not prove the final rendered UI state.', '/__desktop/evidence', {}, args => args],
+    ['business_scenario_result', 'Explain the current scenario as four separate stages: created, applied, real API/Scenario hit, and page verification. Includes CodeIntell creation evidence when available, API bindings and field drivers, real requests, route/UI checks, and a precise failure category. Use this instead of describing a created or applied Profile as successfully verified.', '/__desktop/result', {}, args => args],
     ['business_verify_preview', 'Verify the current preview using current Profile, actual API scenario hits, current iframe observation, route and visible-text assertions. Call only after opening the preview and letting the page settle. A 422 response or null pageObservation means the rendered result is NOT verified; never describe it as normal or successful.', '/__desktop/verify', {
       route: { type: 'string', required: true, description: 'Expected hash route fragment such as /credit/productCombine.' },
       containsTextJson: { type: 'string', required: true, description: 'JSON string array of business text that must be visible.' },
       absentTextJson: { type: 'string', required: true, description: 'JSON string array of business text that must not be visible; use [] when none.' }
     }, args => ({ route: args.route, containsText: JSON.parse(args.containsTextJson), absentText: JSON.parse(args.absentTextJson) })],
     ['business_apply_profile', 'Apply an existing Mock Profile to the persistent sidebar preview without opening a separate window. This only issues a reload command. After the page settles, call business_verify_preview; do not claim success from this result or API evidence alone.', '/__desktop/apply', { profileId: { type: 'string', required: true, description: 'Exact profile ID returned by business_list_profiles.' } }, args => args],
-    ['business_create_profile', 'Create or replace one user-owned Mock Profile with 1-12 validated API scenarios. Analyze CodeIntell/source and every target mock.json first; only existing API mocks are accepted. Pass one scenario per API as {id,apiUrl,label?,data}. The service restores missing top-level response-envelope fields, rejects duplicated data envelopes and duplicate API bindings, validates the resulting Profile, and rolls back every file on failure. Returns an operationId for rollback.', '/__desktop/create-profile', {
+    ['business_create_profile', 'Create or replace one user-owned Mock Profile with 1-12 validated API scenarios. Analyze CodeIntell/source first. Existing mocks are reused; when mock.json is missing, a basic response envelope may be created in the user Overlay only if the same evidenceId confirms that API and its Rsp.ts. Pass one scenario per API as {id,apiUrl,label?,data}. The service rejects duplicated data envelopes and duplicate API bindings, performs a real middleware request-hit check, and rolls back every file on failure. Returns an operationId for rollback.', '/__desktop/create-profile', {
       profileId: { type: 'string', required: true, description: 'Stable ID beginning with a letter; letters, digits, underscore and dash only.' },
       evidenceId: { type: 'string', required: true, description: 'Unexpired evidenceId returned by business_analyze_target for this exact route and API set.' },
       label: { type: 'string', required: true, description: 'Business-readable scenario label.' },
@@ -75,7 +85,7 @@ export async function apply(ctx) {
       async execute(args, exec) {
         const value = await connection()
         await registerWorkspace(value)
-        const writes = new Set(['/__desktop/open-preview', '/__desktop/analyze-target', '/__desktop/apply', '/__desktop/verify', '/__desktop/create-profile', '/__desktop/rollback'])
+        const writes = new Set(['/__desktop/open-preview', '/__desktop/analyze-target', '/__desktop/apply', '/__desktop/verify', '/__desktop/create-profile', '/__desktop/rollback', '/__desktop/user-data/import'])
         const response = await fetch(`${value.origin}${route}`, {
           method: writes.has(route) ? 'POST' : 'GET',
           headers: { Authorization: `Bearer ${value.token}`, 'Content-Type': 'application/json',

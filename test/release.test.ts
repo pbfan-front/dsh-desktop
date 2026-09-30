@@ -291,6 +291,32 @@ describe('GitHub release contract', () => {
     }
   })
 
+  it('runs release preflight before every package build', async () => {
+    const packageJson = JSON.parse(
+      await readFile(path.join(projectRoot, 'package.json'), 'utf8')
+    ) as { scripts: Record<string, string> }
+
+    expect(packageJson.scripts['release:preflight']).toContain('release-preflight.mjs --channel production')
+    expect(packageJson.scripts['release:preflight:dev']).toContain('release-preflight.mjs --channel development')
+    for (const script of [
+      'package:dir',
+      'package:mac',
+      'package:mac:arm64',
+      'package:mac:x64',
+      'package:win'
+    ]) {
+      expect(packageJson.scripts[script]).toContain('release:preflight')
+    }
+    for (const script of [
+      'package:dev:dir',
+      'package:dev:mac:arm64',
+      'package:dev:mac:x64',
+      'package:dev:win'
+    ]) {
+      expect(packageJson.scripts[script]).toContain('release:preflight:dev')
+    }
+  })
+
   it('packages an isolated development channel from the current workspace', async () => {
     const packageJson = JSON.parse(
       await readFile(path.join(projectRoot, 'package.json'), 'utf8')
@@ -353,6 +379,10 @@ describe('GitHub release contract', () => {
     expect(workflow).toContain('runs-on: macos-15')
     expect(workflow).toContain('runs-on: macos-15-intel')
     expect(workflow).toContain('runs-on: windows-2022')
+    expect(workflow).toContain('Smoke test packaged Apple Silicon business runtime')
+    expect(workflow).toContain('Smoke test packaged Intel business runtime')
+    expect(workflow).toContain('Smoke test packaged Windows business runtime')
+    expect(workflow).toContain('release:smoke:business')
     expect(workflow).toContain('npm run package:dev:win')
     expect(workflow).toContain('Smoke test packaged Windows Harness')
     expect(workflow).toContain('$sourceExecutable = Get-Item $env:SMOKE_EXE')

@@ -9,6 +9,7 @@ export interface BusinessBuildStep {
 export interface BusinessBuildPlanOptions {
   businessRoot: string
   webRoot: string
+  desktopRoot?: string
   nodeExecutable?: string
 }
 

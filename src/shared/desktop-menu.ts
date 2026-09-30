@@ -7,6 +7,8 @@ export const desktopMenuCommands = [
   'show-harness-log',
   'check-for-updates',
   'export-session',
+  'import-business-package',
+  'rollback-business-package',
   'undo',
   'redo',
   'cut',

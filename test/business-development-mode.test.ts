@@ -18,4 +18,13 @@ describe('business development mode', () => {
     const main = await readFile(join(process.cwd(), 'src/main/index.ts'), 'utf8')
     expect(main).toContain("developmentAppUrl: !app.isPackaged ? process.env.DSH_BUSINESS_APP_URL : undefined")
   })
+
+  it('recovers an unexpectedly exited business runtime without restarting Desktop', async () => {
+    const source = await readFile(join(process.cwd(), 'src/main/business-preview.ts'), 'utf8')
+    expect(source).toContain('scheduleRecovery(`业务服务已退出')
+    expect(source).toContain('this.recoveryAttempts.length >= 5')
+    expect(source).toContain('Math.min(8_000, 500 * (2 ** (attempt - 1)))')
+    expect(source).toContain("phase: 'recovering'")
+    expect(source).toContain('async restart(): Promise<string>')
+  })
 })

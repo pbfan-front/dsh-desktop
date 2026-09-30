@@ -20,7 +20,7 @@ const run = (command, args, cwd, extraEnv = {}) => {
 
 await access(join(businessRoot, 'mock-platform', 'package.json'))
 if (!exportOnly) {
-  for (const step of createBusinessBuildPlan({ businessRoot, webRoot })) {
+  for (const step of createBusinessBuildPlan({ businessRoot, webRoot, desktopRoot })) {
     console.log(`\n[business:sync] ${step.label}`)
     run(step.command, step.args, step.cwd, step.env)
   }

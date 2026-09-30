@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, relative, isAbsolute, extname } from 'node:path'
@@ -38,11 +38,51 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const createMock = require(join(packageRoot, 'localMockMiddleware.cjs'))
   let middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
   const codeIntellRoot = join(source, '.codeIntell')
-  const [codeRoutes, codeIndex] = await Promise.all([
-    readFile(join(codeIntellRoot, 'routes.json'), 'utf8').then(JSON.parse),
-    readFile(join(codeIntellRoot, 'index.json'), 'utf8').then(JSON.parse)
-  ])
+  let codeRoutes = []
+  let codeIndex = {}
+  let codeIntellLifecycleStamp = ''
+  let codeIntellStatus = { state: 'unavailable', fresh: false, compatible: false, buildId: null, generatedAt: null,
+    coverage: null, lastCheckedAt: null, lastLoadedAt: null, error: 'CodeIntell has not been loaded.' }
+  const sha256 = async file => createHash('sha256').update(await readFile(file)).digest('hex')
+  const refreshCodeIntell = async (force = false) => {
+    const checkedAt = new Date().toISOString()
+    try {
+      const lifecycleText = await readFile(join(codeIntellRoot, 'lifecycle.json'), 'utf8')
+      const stamp = createHash('sha256').update(lifecycleText).digest('hex')
+      if (!force && stamp === codeIntellLifecycleStamp && codeIntellStatus.state === 'ready') {
+        codeIntellStatus = { ...codeIntellStatus, lastCheckedAt: checkedAt }
+        return codeIntellStatus
+      }
+      const lifecycle = JSON.parse(lifecycleText)
+      if (lifecycle.schemaVersion !== 1) throw new Error(`Unsupported CodeIntell lifecycle schema: ${lifecycle.schemaVersion}`)
+      if (lifecycle.mode === 'release' && lifecycle.buildId !== manifest.buildId) throw new Error('CodeIntell build ID does not match the business package')
+      if (lifecycle.mode === 'release' && lifecycle.sourceDigestSha256 !== manifest.provenance?.sourceDigestSha256) throw new Error('CodeIntell source digest does not match the business package')
+      if (lifecycle.mode === 'release' && lifecycle.businessWebEntrySha256 !== manifest.provenance?.businessWebEntrySha256) throw new Error('CodeIntell is not bound to the current business Web build')
+      for (const [name, hash] of Object.entries(lifecycle.artifacts || {})) {
+        if (!/^[a-z0-9.-]+\.json$/i.test(name) || await sha256(join(codeIntellRoot, name)) !== hash) throw new Error(`CodeIntell artifact is corrupt: ${name}`)
+      }
+      const [routes, index] = await Promise.all([
+        readFile(join(codeIntellRoot, 'routes.json'), 'utf8').then(JSON.parse),
+        readFile(join(codeIntellRoot, 'index.json'), 'utf8').then(JSON.parse)
+      ])
+      if (!Array.isArray(routes) || !index || typeof index !== 'object' || Array.isArray(index)) throw new Error('CodeIntell artifacts have an incompatible shape')
+      codeRoutes = routes
+      codeIndex = index
+      codeIntellLifecycleStamp = stamp
+      codeIntellStatus = { state: 'ready', fresh: true, compatible: true, mode: lifecycle.mode || 'unknown',
+        buildId: lifecycle.buildId || manifest.buildId, generatedAt: lifecycle.generatedAt || null,
+        sourceDigestSha256: lifecycle.sourceDigestSha256 || null, coverage: lifecycle.coverage || null,
+        lastCheckedAt: checkedAt, lastLoadedAt: checkedAt, error: null }
+    } catch (error) {
+      codeIntellStatus = { ...codeIntellStatus, state: 'degraded', fresh: false, compatible: false,
+        lastCheckedAt: checkedAt, error: error instanceof Error ? error.message : String(error) }
+    }
+    return codeIntellStatus
+  }
+  await refreshCodeIntell(true)
   const analysisEvidence = new Map()
+  const USER_DATA_SCHEMA_VERSION = 2
+  const USER_DATA_PACKAGE_KIND = 'dsh-business-user-mocks'
   const profileFile = join(source, 'src/baseTypes/api/mock-profiles.json')
   const userProfileFile = join(userRoot, 'src/baseTypes/api/mock-profiles.json')
   const readProfiles = async file => {
@@ -50,6 +90,12 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const data = JSON.parse(await readFile(file, 'utf8'))
       return Array.isArray(data.profiles) ? data.profiles : Object.entries(data.profiles || {}).map(([id, value]) => ({ ...value, id }))
     } catch (error) { if (error.code === 'ENOENT') return []; throw error }
+  }
+  const readProfileDocument = async file => {
+    try {
+      const data = JSON.parse(await readFile(file, 'utf8'))
+      return { exists: true, schemaVersion: Number(data.schemaVersion || data.version || 1), profiles: Array.isArray(data.profiles) ? data.profiles : Object.entries(data.profiles || {}).map(([id, value]) => ({ ...value, id })) }
+    } catch (error) { if (error.code === 'ENOENT') return { exists: false, schemaVersion: USER_DATA_SCHEMA_VERSION, profiles: [] }; throw error }
   }
   const catalog = async () => {
     const byId = new Map((await readProfiles(profileFile)).map(item => [item.id, item]))
@@ -72,11 +118,13 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       }
       const scenarios = [...scenarioMap.values()]
       const requested = typeof selection === 'string' ? [selection] : selection.sequence || [selection.scenario]
+      const metadata = plainObject(configs.at(-1)?._dsh) ? configs.at(-1)._dsh : null
       return { apiUrl, scenarioId: requested[0] || '', mockPath: relativePath, exists: configs.length > 0,
         scenarioExists: requested.every(id => scenarios.some(item => item.id === id)), scenarios,
-        label: configs.at(-1)?.label, driverFields: profile.driverFields?.[apiUrl] }
+        label: configs.at(-1)?.label, driverFields: profile.driverFields?.[apiUrl],
+        compatibility: metadata?.compatibility || (metadata ? 'unknown' : 'built-in'), conflictingFields: metadata?.conflictingFields || [] }
     }))
-    const issueCount = apis.filter(item => !item.exists || !item.scenarioExists).length
+    const issueCount = apis.filter(item => !item.exists || !item.scenarioExists || item.compatibility === 'needs-repair').length
     return { ...profile, label: profile.label || profile.id, page: profile.page || 'other', action: profile.action || 'view',
       actionLabel: profile.actionLabel || '查看详情', branchLabel: profile.branchLabel || profile.label || profile.id,
       actionFlows: Array.isArray(profile.actionFlows) ? profile.actionFlows : [], notes: Array.isArray(profile.notes) ? profile.notes : [],
@@ -99,6 +147,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
     await rename(temporary, file)
   }
+  const contentHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const scenarioArray = config => Array.isArray(config?.scenarios)
     ? config.scenarios
     : Object.entries(config?.scenarios || {}).map(([id, value]) => ({ ...value, id }))
@@ -107,6 +156,65 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       try { return { file, config: JSON.parse(await readFile(file, 'utf8')) } } catch (error) { if (error.code !== 'ENOENT') throw error }
     }
     return null
+  }
+  const typeFilesForMock = relativePath => {
+    const directory = relativePath.replace(/\/mock\.json$/, '')
+    return { request: `${directory}/Req.ts`, response: `${directory}/Rsp.ts` }
+  }
+  const readOptionalText = async file => {
+    try { return await readFile(join(source, file), 'utf8') } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+  const extractInterfaces = text => {
+    const interfaces = new Map()
+    const pattern = /(?:export\s+)?(?:default\s+)?interface\s+([A-Za-z_$][\w$]*)[^\{]*\{/g
+    for (const match of text.matchAll(pattern)) {
+      let depth = 1; let index = match.index + match[0].length
+      for (; index < text.length && depth > 0; index += 1) {
+        if (text[index] === '{') depth += 1
+        else if (text[index] === '}') depth -= 1
+      }
+      if (depth === 0) interfaces.set(match[1], text.slice(match.index + match[0].length, index - 1))
+    }
+    return interfaces
+  }
+  const generatePayloadFromResponseType = (text, apiUrl) => {
+    const interfaces = extractInterfaces(text)
+    const defaultName = text.match(/export\s+default\s+interface\s+([A-Za-z_$][\w$]*)/)?.[1]
+      || text.match(/export\s+default\s+([A-Za-z_$][\w$]*)/)?.[1]
+    if (!defaultName || !interfaces.has(defaultName)) throw new Error(`Rsp.ts for ${apiUrl} has no supported default response interface`)
+    const buildType = (rawType, depth, stack) => {
+      const type = rawType.trim().replace(/\s+/g, ' ')
+      if (depth > 8) return null
+      if (/^(string|String)(\s*\|\s*(null|undefined))*$/.test(type)) return ''
+      if (/^(number|Number)(\s*\|\s*(null|undefined))*$/.test(type)) return 0
+      if (/^(boolean|Boolean)(\s*\|\s*(null|undefined))*$/.test(type)) return false
+      const arrayType = type.match(/^(?:Array<(.+)>|(.+)\[\])$/)
+      if (arrayType) return []
+      if (/^Record<|^\{\s*\[/.test(type)) return {}
+      const named = type.split('|').map(item => item.trim()).find(item => interfaces.has(item))
+      if (!named || stack.has(named)) return null
+      return buildInterface(named, depth + 1, new Set([...stack, named]))
+    }
+    const buildInterface = (name, depth, stack) => {
+      const body = interfaces.get(name) || ''
+      const result = {}
+      const property = /(?:^|[;\n])\s*(?:readonly\s+)?["']?([A-Za-z_$][\w$]*)["']?\s*\??\s*:\s*([^;\n]+)\s*;?/g
+      for (const match of body.matchAll(property)) result[match[1]] = buildType(match[2], depth, stack)
+      return result
+    }
+    return buildInterface(defaultName, 0, new Set([defaultName]))
+  }
+  const generatedMockConfig = async (apiUrl, relativePath) => {
+    const types = typeFilesForMock(relativePath)
+    const [requestText, responseText] = await Promise.all([readOptionalText(types.request), readOptionalText(types.response)])
+    if (!responseText) throw new Error(`Cannot create first mock for ${apiUrl}: Rsp.ts was not found`)
+    const payload = generatePayloadFromResponseType(responseText, apiUrl)
+    const method = apiUrl.split('/').at(-1).replace(/\.json$/, '')
+    const baseData = { status: '0', msg: `local mock: ${method}`, data: payload }
+    return {
+      config: { label: method, defaultScenario: 'generated_default', baseData, scenarios: [] },
+      typeEvidence: { request: requestText ? types.request : null, response: types.response },
+    }
   }
   const normalizeScenarioData = (input, template, apiUrl) => {
     if (!plainObject(input)) throw new Error(`Scenario data for ${apiUrl} must be a JSON object`)
@@ -125,6 +233,98 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       else await atomicJson(item.file, JSON.parse(item.content))
     }
   }
+  const readSourceMock = async relativePath => {
+    try { return JSON.parse(await readFile(join(source, relativePath), 'utf8')) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+  const mockTemplate = config => config?.baseData || scenarioArray(config)[0]?.data || null
+  const incompatiblePaths = (value, template, prefix = '') => {
+    if (!plainObject(value) || !plainObject(template)) return []
+    const issues = []
+    for (const [key, child] of Object.entries(value)) {
+      if (!Object.hasOwn(template, key)) { issues.push(prefix ? `${prefix}.${key}` : key); continue }
+      if (plainObject(child) && plainObject(template[key])) issues.push(...incompatiblePaths(child, template[key], prefix ? `${prefix}.${key}` : key))
+    }
+    return issues
+  }
+  let userDataStatus = { schemaVersion: USER_DATA_SCHEMA_VERSION, migrated: false, operationId: null, conflicts: [] }
+  const migrateUserData = async () => {
+    const document = await readProfileDocument(userProfileFile)
+    const profiles = document.profiles
+    const originalProfilesJson = JSON.stringify(profiles)
+    const rollback = { operationId: randomUUID(), kind: 'schema-migration', files: [] }
+    const changes = new Map()
+    const remember = async file => {
+      if (rollback.files.some(item => item.file === file)) return
+      try { rollback.files.push({ file, content: await readFile(file, 'utf8') }) } catch (error) { if (error.code === 'ENOENT') rollback.files.push({ file, content: null }); else throw error }
+    }
+    const conflicts = []
+    for (const profile of profiles) {
+      profile.schemaVersion = USER_DATA_SCHEMA_VERSION
+      for (const apiUrl of Object.keys(profile.apis || {})) {
+        const relativePath = apiMockRelative(apiUrl)
+        const overlayFile = join(userRoot, relativePath)
+        let overlay
+        try { overlay = JSON.parse(await readFile(overlayFile, 'utf8')) } catch (error) { if (error.code === 'ENOENT') continue; throw error }
+        const sourceMock = await readSourceMock(relativePath)
+        const currentHash = sourceMock ? contentHash(sourceMock) : null
+        const previous = plainObject(overlay._dsh) ? overlay._dsh : {}
+        const next = { ...previous, schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId }
+        if (!previous.baseMockHash) {
+          next.baseMockHash = currentHash
+          next.baseBuildId = manifest.buildId
+          next.compatibility = currentHash ? 'legacy-migrated' : 'source-missing'
+        } else if (previous.baseMockHash !== currentHash) {
+          const template = mockTemplate(sourceMock)
+          const unknown = [...new Set(scenarioArray(overlay).flatMap(item => incompatiblePaths(item.data, template)))]
+          if (sourceMock && unknown.length === 0) {
+            next.baseMockHash = currentHash
+            next.baseBuildId = manifest.buildId
+            next.compatibility = 'auto-migrated'
+            next.migratedAt = new Date().toISOString()
+          } else {
+            next.compatibility = 'needs-repair'
+            next.currentBuildId = manifest.buildId
+            next.conflictingFields = unknown
+            conflicts.push({ profileId: profile.id, apiUrl, reason: sourceMock ? 'response-fields-changed' : 'source-mock-removed', fields: unknown })
+          }
+        } else {
+          next.compatibility = 'compatible'
+          next.baseBuildId = manifest.buildId
+        }
+        const nextOverlay = { ...overlay, schemaVersion: USER_DATA_SCHEMA_VERSION, _dsh: next }
+        if (JSON.stringify(nextOverlay) !== JSON.stringify(overlay)) changes.set(overlayFile, nextOverlay)
+      }
+    }
+    const nextDocument = { schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId, updatedAt: new Date().toISOString(), profiles }
+    if (document.exists && (document.schemaVersion !== USER_DATA_SCHEMA_VERSION || JSON.stringify(profiles) !== originalProfilesJson)) changes.set(userProfileFile, nextDocument)
+    if (changes.size) {
+      for (const file of changes.keys()) await remember(file)
+      const rollbackFile = join(userRoot, '.rollbacks', `${rollback.operationId}.json`)
+      await remember(rollbackFile)
+      try {
+        for (const [file, value] of changes) await atomicJson(file, value)
+        await atomicJson(rollbackFile, rollback)
+        userDataStatus = { schemaVersion: USER_DATA_SCHEMA_VERSION, migrated: true, operationId: rollback.operationId, conflicts }
+      } catch (error) {
+        await restoreRollback(rollback)
+        throw new Error(`User Mock migration rolled back: ${error.message}`)
+      }
+    } else userDataStatus = { schemaVersion: USER_DATA_SCHEMA_VERSION, migrated: false, operationId: null, conflicts }
+  }
+  const exportUserData = async () => {
+    const { profiles } = await readProfileDocument(userProfileFile)
+    const mocks = {}
+    for (const profile of profiles) {
+      for (const apiUrl of Object.keys(profile.apis || {})) {
+        if (Object.hasOwn(mocks, apiUrl)) continue
+        try { mocks[apiUrl] = JSON.parse(await readFile(join(userRoot, apiMockRelative(apiUrl)), 'utf8')) } catch (error) {
+          if (error.code !== 'ENOENT') throw error
+        }
+      }
+    }
+    return { kind: USER_DATA_PACKAGE_KIND, schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId,
+      sourceBuildId: manifest.buildId, exportedAt: new Date().toISOString(), profiles, mocks }
+  }
   const objectFields = value => plainObject(value) ? Object.keys(value).slice(0, 80) : []
   const payloadFields = value => {
     if (!plainObject(value)) return []
@@ -136,6 +336,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     return [...new Set(fields)].slice(0, 120)
   }
   const analyzeTarget = async input => {
+    await refreshCodeIntell()
+    if (codeIntellStatus.state !== 'ready') throw new Error(`CodeIntell unavailable: ${codeIntellStatus.error}`)
     const routePath = String(input?.routePath || '').trim()
     const query = String(input?.query || '').trim().toLowerCase()
     const queryTerms = [...new Set([query, ...query.split(/[\s,，。；;、/]+/u)])].filter(term => term.length > 1)
@@ -231,19 +433,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
     for (const apiUrl of explicitApis) {
       if (typeof apiUrl !== 'string') continue
-      apiMap.set(apiUrl, { apiUrl, score: 160, evidence: [{ file: componentFile, via: 'explicit API supplied for CodeIntell/mock validation', source: 'request' }] })
+      if (!apiMap.has(apiUrl)) throw new Error(`Explicit API lacks CodeIntell/source evidence for this route: ${apiUrl}`)
+      apiMap.get(apiUrl).score += 160
     }
     const apis = []
     for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
       let relativePath
       try { relativePath = apiMockRelative(candidate.apiUrl) } catch { continue }
       const existing = await readMockConfig(relativePath)
-      if (!existing) continue
-      const scenarios = scenarioArray(existing.config)
-      const template = existing.config.baseData || scenarios[0]?.data || {}
-      const searchable = `${candidate.apiUrl} ${existing.config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
+      let generated
+      if (!existing) {
+        try { generated = await generatedMockConfig(candidate.apiUrl, relativePath) } catch { continue }
+      }
+      const config = existing?.config || generated.config
+      const scenarios = scenarioArray(config)
+      const template = config.baseData || scenarios[0]?.data || {}
+      const searchable = `${candidate.apiUrl} ${config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
       candidate.score += queryScore(searchable, 60, 180)
-      apis.push({ ...candidate, mockPath: relativePath, label: existing.config.label || candidate.apiUrl,
+      apis.push({ ...candidate, mockPath: relativePath, mockExists: Boolean(existing), canGenerate: Boolean(existing || generated), typeEvidence: generated?.typeEvidence,
+        label: config.label || candidate.apiUrl,
         envelopeFields: objectFields(template), fields: payloadFields(template.data),
         scenarios: scenarios.slice(0, 50).map(item => ({ id: item.id, label: item.label || item.id })) })
     }
@@ -254,12 +462,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const result = { evidenceId, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), query: input.query || '',
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
       routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })), apis }
-    analysisEvidence.set(evidenceId, { routePath: route.path, apiUrls: new Set(apis.map(api => api.apiUrl)), expiresAt: Date.now() + 30 * 60_000 })
+    analysisEvidence.set(evidenceId, { routePath: route.path,
+      apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
+      expiresAt: Date.now() + 30 * 60_000 })
     return result
   }
+  await migrateUserData()
   const defaultSessionId = 'default'
+  const runtimeStateFile = join(userRoot, '.preview-runtime-state.json')
+  let persistedSessionStates = {}
+  try {
+    const restored = JSON.parse(await readFile(runtimeStateFile, 'utf8'))
+    if (plainObject(restored?.sessions)) persistedSessionStates = restored.sessions
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid preview state: ${error.message}`)
+  }
   const sessionStates = new Map()
   const pageObservations = new Map()
+  const verificationResults = new Map()
+  const creationRecords = new Map()
   const businessAppUrl = route => {
     const target = new URL(developmentAppUrl || `${origin}${manifest.businessPath}`)
     target.hash = route
@@ -270,12 +491,81 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const cookieValue = (req, name) => String(req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith(`${name}=`))?.slice(name.length + 1)
   const requestSessionId = (req, url) => safeSessionId(req.headers['x-dsh-session'] || url.searchParams.get('__dshSession') || decodeURIComponent(cookieValue(req, 'dsh_business_session') || ''))
   const stateFor = sessionId => {
-    if (!sessionStates.has(sessionId)) sessionStates.set(sessionId, initialState())
+    if (!sessionStates.has(sessionId)) {
+      const restored = persistedSessionStates[sessionId]
+      if (plainObject(restored) && typeof restored.route === 'string' && restored.route.startsWith('/') && !restored.route.startsWith('//')) {
+        const target = new URL(businessAppUrl(restored.route.slice(0, 500)))
+        if (typeof restored.profileId === 'string' && restored.profileId) target.searchParams.set('__mockProfile', restored.profileId)
+        target.searchParams.set('__dshSession', sessionId)
+        sessionStates.set(sessionId, { revision: Number.isInteger(restored.revision) ? restored.revision : 0,
+          profileId: typeof restored.profileId === 'string' ? restored.profileId : '', url: target.href, verified: false })
+      } else sessionStates.set(sessionId, initialState())
+    }
     return sessionStates.get(sessionId)
   }
+  const persistSessionStates = async () => {
+    const sessions = {}
+    for (const [sessionId, value] of sessionStates) {
+      let route = manifest.entryRoute
+      try { route = new URL(value.url).hash.replace(/^#/, '') || manifest.entryRoute } catch {}
+      sessions[sessionId] = { revision: value.revision, profileId: value.profileId, route: route.slice(0, 500) }
+    }
+    persistedSessionStates = sessions
+    await atomicJson(runtimeStateFile, { schemaVersion: 1, projectId: manifest.projectId, sessions, updatedAt: new Date().toISOString() })
+  }
   const evidence = []
+  const scenarioResult = async (sessionId, state, pageObservation) => {
+    const profile = (await profileSummaries()).find(item => item.id === state.profileId)
+    const requests = evidence.filter(item => item.sessionId === sessionId && item.revision === state.revision)
+    const matchedScenarios = new Set(requests.map(item => item.scenarioId).filter(Boolean))
+    const apiBindings = (profile?.apis || []).map(api => ({
+      apiUrl: api.apiUrl, scenarioId: api.scenarioId, hit: matchedScenarios.has(api.scenarioId),
+      fields: api.driverFields || [], compatibility: api.compatibility, conflictingFields: api.conflictingFields || []
+    }))
+    const requestHit = apiBindings.length > 0 && apiBindings.every(api => api.hit)
+    const verification = verificationResults.get(sessionId) || null
+    let failureCategory = null
+    if (!profile) failureCategory = 'profile-not-applied'
+    else if (!requestHit) failureCategory = 'api-not-hit'
+    else if (verification && !verification.checks.route) failureCategory = 'route-mismatch'
+    else if (verification && (!verification.checks.observationCurrent
+      || verification.checks.containsText.some(item => !item.passed)
+      || verification.checks.absentText.some(item => !item.passed))) failureCategory = 'ui-assertion-failed'
+    else if (!state.verified) failureCategory = 'verification-pending'
+    const stages = {
+      created: { passed: Boolean(profile), detail: profile ? `场景 ${profile.id} 已存在` : '尚未创建或选择场景' },
+      applied: { passed: Boolean(profile), detail: profile ? `Profile ${profile.id} 已应用` : '尚未应用 Profile' },
+      requestHit: { passed: requestHit, detail: `${apiBindings.filter(api => api.hit).length}/${apiBindings.length} 个 API 分支已真实命中` },
+      verified: { passed: state.verified === true, detail: state.verified ? '路由、请求和页面断言均通过' : '页面尚未完成验证或断言未通过' }
+    }
+    return { sessionId, revision: state.revision, profileId: state.profileId, status: state.verified ? 'verified' : failureCategory,
+      failureCategory, stages, creation: creationRecords.get(state.profileId) || null, apiBindings,
+      requests: requests.slice(-30), page: pageObservation && { ...pageObservation, text: pageObservation.text.slice(0, 1000) }, verification }
+  }
   let nextHandler
   const respond = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)) }
+  const validateMockRequest = async (apiUrl, profileId, scenarioId) => {
+    const headers = {}
+    let statusCode = 200
+    let payload
+    await new Promise((resolveRequest, rejectRequest) => {
+      const response = {
+        setHeader(name, value) { headers[String(name).toLowerCase()] = String(value) },
+        status(value) { statusCode = value; return this },
+        json(value) { payload = value; resolveRequest() },
+        send(value) { payload = value; resolveRequest() },
+        redirect() { rejectRequest(new Error(`Unexpected redirect while validating ${apiUrl}`)) }
+      }
+      try {
+        middleware({ path: apiUrl, query: { __mockProfile: profileId }, headers: {}, method: 'POST' }, response)
+      } catch (error) { rejectRequest(error) }
+    })
+    if (statusCode !== 200) throw new Error(`Mock request validation returned HTTP ${statusCode} for ${apiUrl}`)
+    if (decodeURIComponent(headers['x-local-mock-profile'] || '') !== profileId) throw new Error(`Mock request did not select Profile ${profileId}`)
+    if (decodeURIComponent(headers['x-local-mock-scenario'] || '') !== scenarioId) throw new Error(`Mock request did not hit Scenario ${scenarioId}`)
+    if (plainObject(payload?.data) && plainObject(payload.data.data)) throw new Error(`Mock request produced a duplicated data envelope for ${apiUrl}`)
+    return { apiUrl, profileId, scenarioId, status: statusCode }
+  }
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, origin)
@@ -286,17 +576,80 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (req.headers.origin && req.headers.origin !== origin) return respond(res, 403, { error: 'Invalid origin' })
       if (req.headers['sec-fetch-site'] === 'cross-site') return respond(res, 403, { error: 'Cross-site request' })
       if (url.pathname.startsWith('/__desktop/')) {
-        const publicRead = req.method === 'GET' && url.pathname === '/__desktop/state'
+        const publicRead = req.method === 'GET' && ['/__desktop/state', '/__desktop/result-ui'].includes(url.pathname)
         const trustedUI = ['/__desktop/apply-ui', '/__desktop/page-observation-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
         if (!publicRead && !trustedUI && req.headers.authorization !== `Bearer ${token}`) return respond(res, 401, { error: 'Unauthorized' })
-        if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state })
+        if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state, userData: userDataStatus, codeIntell: await refreshCodeIntell() })
+        if (url.pathname === '/__desktop/code-intell/status') return respond(res, 200, await refreshCodeIntell())
+        if (url.pathname === '/__desktop/user-data/status') return respond(res, 200, { ...userDataStatus, projectId: manifest.projectId, buildId: manifest.buildId,
+          userRoot, persistence: 'Preserved across upgrades and reinstall unless the application user-data directory is explicitly deleted.' })
+        if (url.pathname === '/__desktop/user-data/export') return respond(res, 200, await exportUserData())
+        if (url.pathname === '/__desktop/user-data/import' && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 5_000_000) return respond(res, 413, { error: 'Import package is too large' }) }
+          const input = JSON.parse(body)
+          const bundle = input.package
+          if (!plainObject(bundle) || bundle.kind !== USER_DATA_PACKAGE_KIND || bundle.schemaVersion !== USER_DATA_SCHEMA_VERSION) return respond(res, 422, { error: 'Unsupported user Mock package schema' })
+          if (bundle.projectId !== manifest.projectId) return respond(res, 422, { error: `Package project ${bundle.projectId} does not match ${manifest.projectId}` })
+          if (!Array.isArray(bundle.profiles) || !plainObject(bundle.mocks)) return respond(res, 422, { error: 'Import package requires profiles and mocks' })
+          const replaceExisting = input.replaceExisting === true
+          const currentProfiles = await readProfiles(userProfileFile)
+          const currentIds = new Set(currentProfiles.map(profile => profile.id))
+          const importedIds = new Set()
+          const normalizedProfiles = []
+          const mockWrites = new Map()
+          for (const profile of bundle.profiles) {
+            if (!safeId(profile?.id) || !safeText(profile?.label) || !safeText(profile?.page, 64) || !safeRoute(profile?.routePath)) return respond(res, 422, { error: 'Imported Profile has invalid id, label, page or routePath' })
+            if (importedIds.has(profile.id)) return respond(res, 422, { error: `Duplicate imported Profile: ${profile.id}` })
+            if (!replaceExisting && currentIds.has(profile.id)) return respond(res, 409, { error: `Profile already exists: ${profile.id}` })
+            importedIds.add(profile.id)
+            const apis = {}
+            for (const [apiUrl, selection] of Object.entries(profile.apis || {})) {
+              let relativePath; try { relativePath = apiMockRelative(apiUrl) } catch (error) { return respond(res, 422, { error: error.message }) }
+              const config = bundle.mocks[apiUrl]
+              if (!plainObject(config)) return respond(res, 422, { error: `Imported Mock is missing for ${apiUrl}` })
+              const requested = typeof selection === 'string' ? [selection] : Array.isArray(selection?.sequence) ? selection.sequence : [selection?.scenario]
+              const ids = new Set(scenarioArray(config).map(item => item.id))
+              if (!requested.length || requested.some(id => !safeId(id) || !ids.has(id))) return respond(res, 422, { error: `Imported scenario binding is invalid for ${apiUrl}` })
+              apis[apiUrl] = selection
+              mockWrites.set(relativePath, { ...config, schemaVersion: USER_DATA_SCHEMA_VERSION })
+            }
+            if (!Object.keys(apis).length) return respond(res, 422, { error: `Imported Profile has no API bindings: ${profile.id}` })
+            normalizedProfiles.push({ ...profile, schemaVersion: USER_DATA_SCHEMA_VERSION, apis })
+          }
+          const operationId = randomUUID()
+          const rollback = { operationId, kind: 'user-data-import', files: [] }
+          const remember = async file => { if (rollback.files.some(item => item.file === file)) return; try { rollback.files.push({ file, content: await readFile(file, 'utf8') }) } catch (error) { if (error.code === 'ENOENT') rollback.files.push({ file, content: null }); else throw error } }
+          await remember(userProfileFile)
+          for (const relativePath of mockWrites.keys()) await remember(join(userRoot, relativePath))
+          const profiles = currentProfiles.filter(profile => !importedIds.has(profile.id)).concat(normalizedProfiles)
+          try {
+            for (const [relativePath, config] of mockWrites) await atomicJson(join(userRoot, relativePath), config)
+            await atomicJson(userProfileFile, { schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId, updatedAt: new Date().toISOString(), profiles })
+            await migrateUserData()
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            const summaries = await profileSummaries()
+            const invalid = summaries.filter(profile => importedIds.has(profile.id)
+              && profile.apis.some(api => !api.exists || !api.scenarioExists))
+            if (invalid.length) throw new Error(`Imported Profiles have invalid bindings: ${invalid.map(item => item.id).join(', ')}`)
+            const rollbackFile = join(userRoot, '.rollbacks', `${operationId}.json`)
+            await atomicJson(rollbackFile, rollback)
+            return respond(res, 201, { operationId, importedProfiles: [...importedIds], status: userDataStatus })
+          } catch (error) {
+            await restoreRollback(rollback)
+            await migrateUserData()
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            return respond(res, 422, { error: `User Mock import rolled back: ${error.message}` })
+          }
+        }
         if (url.pathname === '/__desktop/profiles') return respond(res, 200, { profiles: await catalog() })
         if (url.pathname === '/__desktop/evidence') return respond(res, 200, { sessionId, revision: state.revision, profileId: state.profileId, requests: evidence.filter(item => item.sessionId === sessionId).slice(-100), pageObservation })
+        if (url.pathname === '/__desktop/result') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
         if (url.pathname === '/__desktop/analyze-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }
           try { return respond(res, 200, await analyzeTarget(JSON.parse(body))) } catch (error) { return respond(res, 422, { error: error.message }) }
         }
         if (url.pathname === '/__desktop/state') return respond(res, 200, state)
+        if (url.pathname === '/__desktop/result-ui') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
         if (url.pathname === '/__desktop/open-preview' && req.method === 'POST') {
           process.send?.({ type: 'show-preview' })
           return respond(res, 202, { status: 'opening', message: 'Business preview window requested.' })
@@ -307,6 +660,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           pageObservation = { revision: state.revision, profileId: state.profileId, route: String(value.route || '').slice(0, 500),
             title: String(value.title || '').slice(0, 200), text: String(value.text || '').slice(0, 50000), observedAt: new Date().toISOString() }
           pageObservations.set(sessionId, pageObservation)
+          const observedBusinessRoute = pageObservation.route.includes('#')
+            ? pageObservation.route.slice(pageObservation.route.indexOf('#') + 1)
+            : pageObservation.route
+          if (observedBusinessRoute.startsWith('/') && !observedBusinessRoute.startsWith('//')) {
+            const target = new URL(businessAppUrl(observedBusinessRoute))
+            if (state.profileId) target.searchParams.set('__mockProfile', state.profileId)
+            target.searchParams.set('__dshSession', sessionId)
+            state = { ...state, url: target.href }
+            sessionStates.set(sessionId, state)
+            await persistSessionStates()
+          }
           return respond(res, 202, { status: 'recorded' })
         }
         if (url.pathname === '/__desktop/verify' && req.method === 'POST') {
@@ -328,6 +692,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const verified = checks.currentProfile && checks.observationCurrent && checks.route && checks.containsText.every(item => item.passed) && checks.absentText.every(item => item.passed) && checks.scenarios.every(item => item.passed)
           state = { ...state, verified }
           sessionStates.set(sessionId, state)
+          verificationResults.set(sessionId, { verified, checkedAt: new Date().toISOString(), expected: input, checks })
           return respond(res, verified ? 200 : 422, { verified, checks, pageObservation: pageObservation && { ...pageObservation, text: pageObservation.text.slice(0, 2000) } })
         }
         if (url.pathname === '/__desktop/create-profile' && req.method === 'POST') {
@@ -349,34 +714,57 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const seenMockPaths = new Set()
           for (const item of input.scenarios) {
             if (!safeId(item?.id) || !safeText(item?.apiUrl, 240) || !safeText(item?.label || item?.id) || !plainObject(item?.data)) return respond(res, 422, { error: 'Each scenario needs a valid ASCII id, apiUrl, label and object data' })
-            if (!analysis.apiUrls.has(item.apiUrl)) return respond(res, 422, { error: `API was not established by business_analyze_target: ${item.apiUrl}` })
+            const apiEvidence = analysis.apis.get(item.apiUrl)
+            if (!apiEvidence) return respond(res, 422, { error: `API was not established by business_analyze_target: ${item.apiUrl}` })
             const relativePath = apiMockRelative(item.apiUrl)
+            if (apiEvidence.mockPath !== relativePath) return respond(res, 422, { error: `API mock path differs from analyzed evidence: ${item.apiUrl}` })
             if (seenMockPaths.has(relativePath)) return respond(res, 422, { error: `Only one scenario binding is allowed per API in a Profile: ${item.apiUrl}` })
             seenMockPaths.add(relativePath)
-            const existing = await readMockConfig(relativePath)
-            if (!existing) return respond(res, 422, { error: `API mock does not exist in the packaged project: ${item.apiUrl}` })
+            let existing = await readMockConfig(relativePath)
+            if (!existing) {
+              if (!apiEvidence.typeEvidence?.response) return respond(res, 422, { error: `API has no response type evidence for first Mock creation: ${item.apiUrl}` })
+              try {
+                const generated = await generatedMockConfig(item.apiUrl, relativePath)
+                if (generated.typeEvidence.response !== apiEvidence.typeEvidence.response) throw new Error('Response type evidence changed after analysis')
+                existing = { file: join(userRoot, relativePath), config: generated.config }
+              } catch (error) { return respond(res, 422, { error: error.message }) }
+            }
             const template = existing.config.baseData || scenarioArray(existing.config)[0]?.data
             let data
             try { data = normalizeScenarioData(item.data, template, item.apiUrl) } catch (error) { return respond(res, 422, { error: error.message }) }
             const scenarios = scenarioArray(existing.config).filter(value => value.id !== item.id)
             scenarios.push({ id: item.id, label: item.label || item.id, data })
-            mutations.push({ file: join(userRoot, relativePath), value: { ...existing.config, scenarios } })
+            const sourceMock = await readSourceMock(relativePath)
+            mutations.push({ file: join(userRoot, relativePath), value: {
+              ...existing.config,
+              schemaVersion: USER_DATA_SCHEMA_VERSION,
+              _dsh: { ...(plainObject(existing.config._dsh) ? existing.config._dsh : {}), schemaVersion: USER_DATA_SCHEMA_VERSION,
+                projectId: manifest.projectId, baseBuildId: manifest.buildId, baseMockHash: sourceMock ? contentHash(sourceMock) : null,
+                compatibility: sourceMock ? 'compatible' : 'source-missing', updatedAt: new Date().toISOString() },
+              scenarios,
+            } })
             apiBindings[item.apiUrl] = item.id
           }
           await remember(userProfileFile)
           for (const mutation of mutations) await remember(mutation.file)
           const profiles = (await readProfiles(userProfileFile)).filter(profile => profile.id !== input.profile.id)
-          profiles.push({ ...input.profile, apis: apiBindings })
+          profiles.push({ ...input.profile, schemaVersion: USER_DATA_SCHEMA_VERSION, apis: apiBindings })
           const rollbackFile = join(userRoot, '.rollbacks', `${operationId}.json`)
           try {
             for (const mutation of mutations) await atomicJson(mutation.file, mutation.value)
-            await atomicJson(userProfileFile, { version: 1, profiles })
+            await atomicJson(userProfileFile, { schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId, updatedAt: new Date().toISOString(), profiles })
             middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
             const summary = (await profileSummaries()).find(profile => profile.id === input.profile.id)
             if (!summary?.ok || summary.apis.length !== input.scenarios.length) throw new Error(`Created Profile failed binding validation (${summary?.issueCount ?? 'missing'} issue(s))`)
+            const requestValidation = []
+            for (const item of input.scenarios) requestValidation.push(await validateMockRequest(item.apiUrl, input.profile.id, item.id))
             await atomicJson(rollbackFile, rollback)
             analysisEvidence.delete(input.evidenceId)
-            return respond(res, 201, { operationId, profileId: input.profile.id, scenarioCount: input.scenarios.length, rollbackFile, validation: { ok: true, apiBindings: summary.apis.map(api => ({ apiUrl: api.apiUrl, scenarioId: api.scenarioId })) } })
+            creationRecords.set(input.profile.id, { createdAt: new Date().toISOString(), evidenceId: input.evidenceId,
+              routePath: analysis.routePath, apis: input.scenarios.map(item => ({ apiUrl: item.apiUrl, scenarioId: item.id,
+                evidence: analysis.apis.get(item.apiUrl)?.typeEvidence || null })) })
+            return respond(res, 201, { operationId, profileId: input.profile.id, scenarioCount: input.scenarios.length, rollbackFile,
+              validation: { ok: true, apiBindings: summary.apis.map(api => ({ apiUrl: api.apiUrl, scenarioId: api.scenarioId })), requests: requestValidation } })
           } catch (error) {
             await restoreRollback(rollback)
             middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
@@ -405,6 +793,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           if (isUserProfile) {
             for (const [apiUrl, selection] of bindings) {
               let config; try { config = JSON.parse(await readFile(join(userRoot, apiMockRelative(apiUrl)), 'utf8')) } catch { return respond(res, 422, { error: `User scenario file missing for ${apiUrl}` }) }
+              if (config?._dsh?.compatibility === 'needs-repair') return respond(res, 422, { error: `User scenario requires migration repair for ${apiUrl}: ${(config._dsh.conflictingFields || []).join(', ')}` })
               const ids = new Set((config.scenarios || []).map(item => item.id))
               const requested = typeof selection === 'string' ? [selection] : selection.sequence || [selection.scenario]
               if (requested.some(id => !ids.has(id))) return respond(res, 422, { error: `User scenario binding invalid for ${apiUrl}` })
@@ -421,7 +810,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           target.searchParams.set('__dshSession', sessionId)
           state = { revision: state.revision + 1, profileId, url: target.href, verified: false }
           sessionStates.set(sessionId, state)
+          await persistSessionStates()
           pageObservations.delete(sessionId)
+          verificationResults.delete(sessionId)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
           return respond(res, 200, { ...state, url: origin + state.url, status: 'applied-command', message: 'Preview will reload. Business outcome has not yet been verified.' })
         }
@@ -450,7 +841,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         res.json = value => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(value)) }
         res.redirect = (code, location) => { res.writeHead(code, { Location: location }); res.end() }
         res.once('finish', () => {
-          evidence.push({ timestamp: new Date().toISOString(), sessionId, path: url.pathname, status: res.statusCode,
+          evidence.push({ timestamp: new Date().toISOString(), sessionId, revision: state.revision, path: url.pathname, status: res.statusCode,
             profileId: decodeURIComponent(String(res.getHeader('x-local-mock-profile') || '')),
             scenarioId: decodeURIComponent(String(res.getHeader('x-local-mock-scenario') || '')) })
           if (evidence.length > 200) evidence.splice(0, evidence.length - 200)

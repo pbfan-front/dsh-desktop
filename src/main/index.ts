@@ -1,6 +1,11 @@
 import { initializeDesktopService, desktopDiagnostics } from './desktop-service'
 import { BusinessPreview } from './business-preview'
 import { ensureBusinessWorkspace } from './business-workspace'
+import {
+  installBusinessPackage,
+  resolveActiveBusinessPackage,
+  rollbackBusinessPackage
+} from './business-package-manager'
 import { checkBlockingPluginUpdates, selectPluginRecoveryTarget, PluginRecoveryEvidence, planPluginRecovery, runPluginRecoveryPlan, type PluginRecoveryCheck } from './plugin-recovery-market'
 import { RepairAgentService, type CrashEvidence } from './repair-agent'
 import { spawn } from 'node:child_process'
@@ -172,7 +177,12 @@ import {
   type PluginUpgradeCandidate
 } from './state/plugin-market-check'
 import { upgradeMarketInSharedTree, upgradePluginToGeneration } from './state/plugin-upgrade'
-import { aboutDetail, bundledHarnessVersion } from './version-info'
+import {
+  aboutDetail,
+  bundledBusinessBuildId,
+  bundledHarnessVersion,
+  desktopReleaseChannel
+} from './version-info'
 import { windowsMenuViewBounds } from './windows-menu-view'
 import { shouldKeepRunningInBackground } from './close-to-tray'
 import {
@@ -363,6 +373,43 @@ function isDevelopmentBuild(): boolean {
     return metadata.dshDesktopChannel === 'development'
   } catch {
     return false
+  }
+}
+
+async function desktopAboutInfo(): Promise<{
+  desktopVersion: string
+  harnessVersion: string
+  businessBuildId: string
+  businessPackageVersion: string
+  channel: 'development' | 'production'
+  platform: string
+  locale: 'en' | 'zh'
+}> {
+  const locale = harnessLocale()
+  const bundledPackageRoot = desktopResourcePath('business-package')
+  const activePackageRoot = await resolveActiveBusinessPackage(
+    bundledPackageRoot,
+    businessDataRootPath(),
+    app.getVersion()
+  )
+  let activeManifest: { buildId?: unknown; packageVersion?: unknown } = {}
+  try {
+    activeManifest = JSON.parse(readFileSync(join(activePackageRoot, 'manifest.json'), 'utf8')) as typeof activeManifest
+  } catch { /* displayed as unknown below */ }
+  return {
+    desktopVersion: app.getVersion(),
+    harnessVersion:
+      bundledHarnessVersion(app.getAppPath()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
+    businessBuildId: typeof activeManifest.buildId === 'string'
+      ? activeManifest.buildId
+      : bundledBusinessBuildId(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'build')) ??
+        (locale === 'zh' ? '未知' : 'Unknown'),
+    businessPackageVersion: typeof activeManifest.packageVersion === 'string'
+      ? activeManifest.packageVersion
+      : (locale === 'zh' ? '内置旧版' : 'Bundled legacy'),
+    channel: desktopReleaseChannel(app.getAppPath(), app.isPackaged),
+    platform: `${process.platform}/${process.arch}`,
+    locale
   }
 }
 
@@ -1844,13 +1891,7 @@ function registerHarnessHandlers(): void {
   ipcMain.removeHandler('desktop:about-info')
   ipcMain.handle('desktop:about-info', (event) => {
     assertTrustedMainWindowEvent(event)
-    const locale = harnessLocale()
-    return {
-      desktopVersion: app.getVersion(),
-      harnessVersion:
-        bundledHarnessVersion(app.getAppPath()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
-      locale
-    }
+    return desktopAboutInfo()
   })
 }
 
@@ -1906,13 +1947,8 @@ function assertTrustedSafeModeManagerEvent(event: IpcMainInvokeEvent): void {
 }
 
 async function showAbout(window: BrowserWindow): Promise<void> {
-  const locale = harnessLocale()
-  const info = {
-    desktopVersion: app.getVersion(),
-    harnessVersion:
-      bundledHarnessVersion(app.getAppPath()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
-    locale
-  }
+  const info = await desktopAboutInfo()
+  const { locale } = info
   if (window && !window.isDestroyed() && window.webContents && !window.webContents.isDestroyed()) {
     try {
       window.webContents.send('desktop:show-about', info)
@@ -1928,9 +1964,10 @@ async function showAbout(window: BrowserWindow): Promise<void> {
     title: 'DSH Desktop',
     message: locale === 'zh' ? '关于 DSH Desktop' : 'About DSH Desktop',
     detail: aboutDetail(
-      app.getVersion(),
-      bundledHarnessVersion(app.getAppPath()),
-      locale
+      info.desktopVersion,
+      info.harnessVersion,
+      locale,
+      info
     ),
     buttons: [checkForUpdatesLabel, locale === 'zh' ? '关闭' : 'Close'],
     defaultId: 1,
@@ -1938,6 +1975,72 @@ async function showAbout(window: BrowserWindow): Promise<void> {
     noLink: true
   })
   if (result.response === 0) await checkForUpdates(true)
+}
+
+function businessDataRootPath(): string {
+  const configuredBusinessUserRoot = !app.isPackaged && process.env.DSH_BUSINESS_USER_ROOT
+    ? resolve(process.env.DSH_BUSINESS_USER_ROOT)
+    : undefined
+  return configuredBusinessUserRoot
+    ? join(configuredBusinessUserRoot, '..')
+    : join(app.getPath('userData'), 'business')
+}
+
+async function importLocalBusinessPackage(window: BrowserWindow): Promise<void> {
+  const locale = harnessLocale()
+  const selected = await dialog.showOpenDialog(window, {
+    title: locale === 'zh' ? '选择业务包目录' : 'Select Business Package Directory',
+    properties: ['openDirectory']
+  })
+  if (selected.canceled || !selected.filePaths[0]) return
+  try {
+    const installed = await installBusinessPackage(
+      selected.filePaths[0],
+      businessDataRootPath(),
+      app.getVersion()
+    )
+    await dialog.showMessageBox(window, {
+      type: 'info',
+      message: locale === 'zh' ? '业务包已安装' : 'Business package installed',
+      detail: locale === 'zh'
+        ? `版本：${installed.packageVersion}\nBuild ID：${installed.buildId}\n下次启动 Desktop 时生效。用户 Profile 和 Mock 数据不会被覆盖。`
+        : `Version: ${installed.packageVersion}\nBuild ID: ${installed.buildId}\nThe package becomes active on the next Desktop launch. User profiles and Mock data are preserved.`,
+      buttons: [locale === 'zh' ? '确定' : 'OK']
+    })
+  } catch (error) {
+    await dialog.showMessageBox(window, {
+      type: 'error',
+      message: locale === 'zh' ? '业务包导入失败' : 'Business package import failed',
+      detail: error instanceof Error ? error.message : String(error),
+      buttons: [locale === 'zh' ? '关闭' : 'Close']
+    })
+  }
+}
+
+async function rollbackLocalBusinessPackage(window: BrowserWindow): Promise<void> {
+  const locale = harnessLocale()
+  try {
+    const packageRoot = await rollbackBusinessPackage(businessDataRootPath(), app.getVersion())
+    const manifest = JSON.parse(readFileSync(join(packageRoot, 'manifest.json'), 'utf8')) as {
+      packageVersion?: unknown
+      buildId?: unknown
+    }
+    await dialog.showMessageBox(window, {
+      type: 'info',
+      message: locale === 'zh' ? '业务包已回退' : 'Business package rolled back',
+      detail: locale === 'zh'
+        ? `版本：${String(manifest.packageVersion ?? '未知')}\nBuild ID：${String(manifest.buildId ?? '未知')}\n下次启动 Desktop 时生效。`
+        : `Version: ${String(manifest.packageVersion ?? 'Unknown')}\nBuild ID: ${String(manifest.buildId ?? 'Unknown')}\nThe rollback becomes active on the next Desktop launch.`,
+      buttons: [locale === 'zh' ? '确定' : 'OK']
+    })
+  } catch (error) {
+    await dialog.showMessageBox(window, {
+      type: 'error',
+      message: locale === 'zh' ? '没有可回退的业务包' : 'No business package is available to roll back',
+      detail: error instanceof Error ? error.message : String(error),
+      buttons: [locale === 'zh' ? '关闭' : 'Close']
+    })
+  }
 }
 
 async function executeDesktopMenuCommand(command: DesktopMenuCommand): Promise<number | undefined> {
@@ -1981,6 +2084,12 @@ async function executeDesktopMenuCommand(command: DesktopMenuCommand): Promise<n
           return false
         })()`
       ).catch(showUnexpectedError)
+      break
+    case 'import-business-package':
+      await importLocalBusinessPackage(window)
+      break
+    case 'rollback-business-package':
+      await rollbackLocalBusinessPackage(window)
       break
     case 'undo':
       contents.undo()
@@ -3213,6 +3322,22 @@ function installMenu(): void {
           }
         },
         {
+          label: isChinese ? '导入业务包…' : 'Import Business Package…',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              void importLocalBusinessPackage(mainWindow).catch(showUnexpectedError)
+            }
+          }
+        },
+        {
+          label: isChinese ? '回退上一业务包' : 'Roll Back Business Package',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              void rollbackLocalBusinessPackage(mainWindow).catch(showUnexpectedError)
+            }
+          }
+        },
+        {
           label: isChinese ? '连接手机…' : 'Connect Phone…',
           accelerator: 'CmdOrCtrl+Shift+M',
           click: () => void showMobilePairing().catch(showUnexpectedError)
@@ -3350,23 +3475,33 @@ async function showMobilePairing(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
-  const businessPackage = process.env.DSH_BUSINESS_PACKAGE || desktopResourcePath('business-package')
+  const bundledBusinessPackage = desktopResourcePath('business-package')
+  const configuredBusinessUserRoot = !app.isPackaged && process.env.DSH_BUSINESS_USER_ROOT
+    ? resolve(process.env.DSH_BUSINESS_USER_ROOT)
+    : undefined
+  const businessDataRoot = businessDataRootPath()
+  const businessPackage = process.env.DSH_BUSINESS_PACKAGE || await resolveActiveBusinessPackage(
+    bundledBusinessPackage,
+    businessDataRoot,
+    app.getVersion()
+  )
   if (existsSync(join(businessPackage, 'manifest.json'))) {
-    const configuredBusinessUserRoot = !app.isPackaged && process.env.DSH_BUSINESS_USER_ROOT
-      ? resolve(process.env.DSH_BUSINESS_USER_ROOT)
-      : undefined
-    const businessDataRoot = configuredBusinessUserRoot
-      ? join(configuredBusinessUserRoot, '..')
-      : join(app.getPath('userData'), 'business')
     process.env.DSH_BUSINESS_CONNECTION_FILE = join(businessDataRoot, 'connection.json')
-    const businessSource = await ensureBusinessWorkspace(businessPackage, businessDataRoot)
+    const configuredBusinessSource = !app.isPackaged && process.env.DSH_BUSINESS_SOURCE_ROOT
+      ? resolve(process.env.DSH_BUSINESS_SOURCE_ROOT)
+      : undefined
+    const businessSource = configuredBusinessSource || await ensureBusinessWorkspace(businessPackage, businessDataRoot)
     businessPreview = new BusinessPreview({
       packageRoot: businessPackage, sourceRoot: businessSource,
       entry: desktopResourcePath('business-runtime.mjs'), node: bundledNodePath(),
       userRoot: configuredBusinessUserRoot || join(businessDataRoot, 'user-data'),
       developmentAppUrl: !app.isPackaged ? process.env.DSH_BUSINESS_APP_URL : undefined,
       connectionFile: process.env.DSH_BUSINESS_CONNECTION_FILE,
-      log: text => console.log(`[business] ${text.trimEnd()}`)
+      log: text => console.log(`[business] ${text.trimEnd()}`),
+      onStateChange: state => {
+        console.log(`[business] state=${state.phase} attempt=${state.attempt}${state.error ? ` error=${state.error}` : ''}`)
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('business:preview-state', state)
+      }
     })
     try { await businessPreview.start() } catch (error) { console.error('[business] Startup failed:', error) }
   }
@@ -3499,6 +3634,19 @@ async function bootstrap(): Promise<void> {
     assertTrustedMainWindowEvent(event)
     if (!businessPreview) throw new Error('Business preview is not included in this build.')
     return { url: await businessPreview.embeddedUrl() }
+  })
+  ipcMain.removeHandler('business:preview-status')
+  ipcMain.handle('business:preview-status', (event) => {
+    assertTrustedMainWindowEvent(event)
+    if (!businessPreview) return { phase: 'failed', attempt: 0, error: 'Business preview is not included in this build.' }
+    return businessPreview.snapshot()
+  })
+  ipcMain.removeHandler('business:restart-preview')
+  ipcMain.handle('business:restart-preview', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    if (!businessPreview) throw new Error('Business preview is not included in this build.')
+    const origin = await businessPreview.restart()
+    return { ok: true, url: `${origin}/?desktop=1&embedded=1` }
   })
   ipcMain.removeHandler('harness:renderer-healthy')
   ipcMain.handle('harness:renderer-healthy', (event) => {

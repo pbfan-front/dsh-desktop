@@ -79,8 +79,10 @@ window.__ModuleLoader__.load({
       return frame
     }
 
-    function mountBusinessFrame(container, url) {
+    function mountBusinessFrame(container, url, onLoadError) {
       const frame = businessFrame()
+      const handleError = () => onLoadError?.()
+      frame.addEventListener('error', handleError)
       let shouldNavigate = frame.dataset.dshBusinessPreviewInitialized !== 'true'
       if (!shouldNavigate) {
         try {
@@ -96,12 +98,13 @@ window.__ModuleLoader__.load({
       }
       container.appendChild(frame)
       return () => {
+        frame.removeEventListener('error', handleError)
         if (frame.parentElement === container) businessFrameParking().appendChild(frame)
       }
     }
 
     function BusinessPreviewPanel() {
-      const [state, setState] = React.useState({ url: '', error: '' })
+      const [state, setState] = React.useState({ url: '', error: '', codeIntell: null, runtimeState: 'starting', runtimeError: '', failureKind: '' })
       const [frameContainer, setFrameContainer] = React.useState(null)
       React.useEffect(() => {
         let active = true
@@ -117,16 +120,25 @@ window.__ModuleLoader__.load({
           const root = hostWindow.document.documentElement
           const url = root.dataset.dshBusinessPreviewUrl
           const error = root.dataset.dshBusinessPreviewError
+          const runtimeState = root.dataset.dshBusinessPreviewState || ''
+          const runtimeError = root.dataset.dshBusinessPreviewRuntimeError || ''
+          const failureKind = root.dataset.dshBusinessPreviewFailureKind || ''
           if (url) {
             try {
               const parsed = new URL(url)
               if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
-              if (active) setState({ url: parsed.href, error: '' })
-            } catch (reason) { if (active) setState({ url: '', error: String(reason) }) }
+              if (active) setState(previous => {
+                try {
+                  const sessionId = previous.url ? new URL(previous.url).searchParams.get('__dshSession') : ''
+                  if (sessionId) parsed.searchParams.set('__dshSession', sessionId)
+                } catch {}
+                return { ...previous, url: parsed.href, error: '', runtimeState: runtimeState || 'ready', runtimeError, failureKind }
+              })
+            } catch (reason) { if (active) setState(previous => ({ ...previous, url: '', error: String(reason) })) }
             return true
           }
           if (error) {
-            if (active) setState({ url: '', error })
+            if (active) setState(previous => ({ ...previous, url: '', error, runtimeState: runtimeState || 'failed', runtimeError, failureKind }))
             return true
           }
           return false
@@ -139,9 +151,9 @@ window.__ModuleLoader__.load({
               if (!active) return
               const parsed = new URL(value.url)
               if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
-              setState({ url: parsed.href, error: '' })
+              setState(previous => ({ ...previous, url: parsed.href, error: '', runtimeState: 'ready', runtimeError: '', failureKind: '' }))
             })
-            .catch(error => { if (active && !acceptPublishedUrl()) setState({ url: '', error: String(error) }) })
+            .catch(error => { if (active && !acceptPublishedUrl()) setState(previous => ({ ...previous, url: '', error: String(error) })) })
           return true
         }
         const requestMainProcessRecovery = () => {
@@ -161,7 +173,7 @@ window.__ModuleLoader__.load({
               if (!active) return
               const parsed = new URL(value.url)
               if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error('业务预览地址不可信。')
-              setState({ url: parsed.href, error: '' })
+              setState({ url: parsed.href, error: '', codeIntell: value.codeIntell || null, runtimeState: 'ready', runtimeError: '', failureKind: '' })
             })
             .catch(() => {
               if (!active) return
@@ -175,8 +187,8 @@ window.__ModuleLoader__.load({
         discover()
         const handleSessionChange = () => discover()
         hostWindow.addEventListener('dsh-desktop:business-session-change', handleSessionChange)
+        hostWindow.addEventListener('dsh-desktop:business-preview-ready', acceptPublishedUrl)
         if (!acceptPublishedUrl()) {
-          hostWindow.addEventListener('dsh-desktop:business-preview-ready', acceptPublishedUrl)
           timer = window.setTimeout(() => {
             if (active && !acceptPublishedUrl()) requestMainProcessRecovery()
           }, 5000)
@@ -191,13 +203,45 @@ window.__ModuleLoader__.load({
       }, [])
       React.useEffect(() => {
         if (!frameContainer || !state.url) return undefined
-        return mountBusinessFrame(frameContainer, state.url)
+        return mountBusinessFrame(frameContainer, state.url, () => {
+          setState(previous => ({ ...previous, runtimeState: 'failed', failureKind: 'page-load-failed', runtimeError: '业务页面加载失败，业务服务仍可能正常运行。' }))
+        })
       }, [frameContainer, state.url])
-      if (state.error) return React.createElement('div', { style: { padding: 20, color: '#b42318' } }, `业务预览加载失败：${state.error}`)
+      const restartPreview = () => {
+        setState(previous => ({ ...previous, runtimeState: 'recovering', error: '', runtimeError: '', failureKind: '' }))
+        const request = window.top?.dshDesktop?.restartBusinessPreview?.() || window.dshDesktop?.restartBusinessPreview?.()
+        request?.catch(error => setState(previous => ({ ...previous, runtimeState: 'failed', error: String(error) })))
+      }
+      const failureLabel = state.failureKind === 'package-incompatible'
+        ? '业务包不兼容或启动失败'
+        : state.failureKind === 'page-load-failed' ? '业务页面加载失败' : '业务服务未启动'
+      const failurePanel = React.createElement('div', { style: { padding: 20, color: '#b42318', textAlign: 'center' } },
+        React.createElement('p', { style: { fontWeight: 600 } }, failureLabel),
+        React.createElement('p', { style: { marginTop: 6, fontSize: 12, color: '#667085' } }, state.runtimeError || state.error || '业务预览暂时不可用。'),
+        React.createElement('div', { style: { display: 'flex', justifyContent: 'center', gap: 8, marginTop: 12 } },
+          React.createElement('button', { onClick: restartPreview, style: { height: 34, padding: '0 14px', border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', color: '#344054', cursor: 'pointer' } }, '重启业务预览'),
+          React.createElement('button', { onClick: () => (window.top?.dshDesktop || window.dshDesktop)?.showHarnessLog?.(), style: { height: 34, padding: '0 14px', border: '1px solid #d0d5dd', borderRadius: 8, background: '#fff', color: '#344054', cursor: 'pointer' } }, '查看日志')))
+      if (state.error && !state.url) return failurePanel
       if (!state.url) return React.createElement('div', { style: { padding: 20, color: '#667085' } }, '正在加载业务预览…')
-      return React.createElement('div', { ref: setFrameContainer,
-        'data-dsh-business-preview-container': true,
-        style: { width: '100%', height: '100%', minHeight: 0 } })
+      return React.createElement('div', { style: { position: 'relative', width: '100%', height: '100%', minHeight: 0 } },
+        (state.runtimeState === 'recovering' || state.runtimeState === 'starting') && React.createElement('div', {
+          style: { position: 'absolute', zIndex: 3, inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(248,250,252,.9)', color: '#475467', fontSize: 13 }
+        }, state.runtimeState === 'recovering' ? '业务预览正在自动恢复…' : '业务预览正在启动…'),
+        state.runtimeState === 'failed' && React.createElement('div', {
+          style: { position: 'absolute', zIndex: 3, inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(248,250,252,.96)' }
+        }, failurePanel),
+        state.codeIntell && React.createElement('div', {
+          title: state.codeIntell.error || `索引生成于 ${state.codeIntell.generatedAt || '未知时间'}`,
+          style: { position: 'absolute', zIndex: 2, right: 12, top: 10, padding: '4px 8px', borderRadius: 12,
+            fontSize: 11, lineHeight: '16px', background: state.codeIntell.state === 'ready' ? '#e8f7ee' : '#fff0ed',
+            color: state.codeIntell.state === 'ready' ? '#08783e' : '#b42318', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }
+        }, state.codeIntell.state === 'ready'
+          ? `索引正常 · ${state.codeIntell.coverage?.routes || 0} 路由`
+          : '索引异常 · 场景分析已降级'),
+        React.createElement('div', { ref: setFrameContainer,
+          'data-dsh-business-preview-container': true,
+          style: { width: '100%', height: '100%', minHeight: 0 } })
+      )
     }
 
     let ctxForBusiness

@@ -29,6 +29,7 @@ __pycache__/
 
 # Native recovery UI smoke-test output
 /artifacts/recovery-ui/
+/artifacts/release-evidence-*.json
 
 # Local-only design docs
 docs/plugin-management.zh.md

@@ -190,6 +190,8 @@ function menuEntries(locale: 'en' | 'zh'): MenuEntry[] {
     { kind: 'command', command: 'show-harness-log', label: zh ? '显示 Harness 日志' : 'Show Harness Log' },
     { kind: 'command', command: 'check-for-updates', label: zh ? '检查更新…' : 'Check for Updates…', shortcut: 'Ctrl+U' },
     { kind: 'command', command: 'export-session', label: zh ? '导出 Session 日志…' : 'Export Session Log…' },
+    { kind: 'command', command: 'import-business-package', label: zh ? '导入业务包…' : 'Import Business Package…' },
+    { kind: 'command', command: 'rollback-business-package', label: zh ? '回退上一业务包' : 'Roll Back Business Package' },
     { kind: 'separator' },
     { kind: 'label', label: zh ? '编辑' : 'EDIT' },
     { kind: 'command', command: 'undo', label: zh ? '撤销' : 'Undo', shortcut: 'Ctrl+Z' },

@@ -10,7 +10,11 @@
 - 业务静态资源和 Mock 请求只允许访问本机服务；控制接口使用随机令牌。
 - 退出、更新 Desktop 时只停止 Desktop 自己创建的业务进程。
 
-P1 已提供独立用户场景目录，以及分析、创建、应用、验证和回滚工具。创建前必须调用 `business_analyze_target`：服务按精确路由读取 CodeIntell 的页面、Interactor、API caller 和同业务域证据，返回候选接口、已有 Mock、响应外层和业务字段，并签发 30 分钟有效的 `evidenceId`；`business_create_profile` 只接受该次分析确认的路由和接口，不能凭模型猜测接口。受控业务工具的所有写入仅落到 Desktop userData，不修改内置源码；macOS 签名要求打包输入可写，因此不能用文件 `0444` 作为发布方案，最终不可变边界由签名 App 完整性和工具授权共同保证。场景创建只接受已存在的 API mock，每个 Profile 对同一 API 只允许一个场景绑定；服务会拒绝重复 `data` 包裹和非法路由，自动补齐既有响应外层字段，并在写入后验证 Profile/Scenario 绑定。任一步骤失败都会恢复全部已修改文件。页面验证同时检查当前 Profile、绑定场景的真实请求命中、iframe 当前路由以及必须出现/不得出现的可见文案。Profile、路由、页面观察和请求证据已按 Harness 对话隔离；侧栏按钮自动传递当前 `sessionId`，iframe 通过同源 Cookie 选择对应状态。尚未完成正式签名公证和干净机器验收。
+P1 已提供独立用户场景目录，以及分析、创建、应用、验证和回滚工具。创建前必须调用 `business_analyze_target`：服务按精确路由读取 CodeIntell 的页面、Interactor、API caller 和同业务域证据，返回候选接口、已有 Mock、响应外层和业务字段，并签发 30 分钟有效的 `evidenceId`；`business_create_profile` 只接受该次分析确认的路由和接口，不能凭模型猜测接口。受控业务工具的所有写入仅落到 Desktop userData，不修改内置源码；macOS 签名要求打包输入可写，因此不能用文件 `0444` 作为发布方案，最终不可变边界由签名 App 完整性和工具授权共同保证。已有 API Mock 会被复用；如果 API 已由 CodeIntell/源码证据确认、尚无 `mock.json` 且存在可解析的 `Rsp.ts`，服务可在用户 Overlay 生成带标准响应信封的首个基础 Mock。每个 Profile 对同一 API 只允许一个场景绑定；服务会拒绝重复 `data` 包裹和非法路由，并在写入后通过真实中间件请求验证 Profile/Scenario 命中。任一步骤失败都会恢复全部已修改文件。页面验证同时检查当前 Profile、绑定场景的真实请求命中、iframe 当前路由以及必须出现/不得出现的可见文案。Profile、路由、页面观察和请求证据已按 Harness 对话隔离；侧栏按钮自动传递当前 `sessionId`，iframe 通过同源 Cookie 选择对应状态。尚未完成正式签名公证和干净机器验收。
+
+用户 Profile 和 Scenario 使用 Schema v2。业务运行时启动时会迁移 v1 数据，并记录创建场景时所依据的业务 Build ID 和内置 Mock 指纹。升级后的内置 Mock 结构兼容时自动更新基线；字段不兼容或内置 API 被移除时标记为 `needs-repair` 并阻止应用，不会静默使用错误数据。`business_user_data_status` 可查看迁移、冲突和用户目录，`business_export_scenarios` 导出不含凭据的便携 JSON 包，`business_import_scenarios` 在另一台电脑原子导入并返回可回滚的 operationId。
+
+覆盖安装和普通升级复用 Desktop 的 userData，用户场景会保留。卸载程序是否删除 userData 取决于系统和卸载选项；跨电脑迁移、主动清理 userData 或重装前，应先调用 `business_export_scenarios`。导入默认拒绝同 ID Profile，只有明确设置 `replaceExisting=true` 才覆盖。
 
 ## 生成业务包
 
@@ -33,6 +37,10 @@ npm run business:verify
 只要业务源码在导出后变化、Next.js 产物过期、业务包被修改、CodeIntell 或 Web 入口错配，打包就会失败并提示重新执行 `npm run business:sync`，不再允许旧产物进入安装包。
 
 ## 开发运行与验证
+
+`npm run dev:business` 会同时启动业务开发服务、Desktop 和 CodeIntell 源码监听。修改 `demo-test/src` 后，业务页面继续走 HMR，CodeIntell 在 800ms 防抖后执行增量索引；成功后运行时会在下一次状态查询或场景分析时热重载，无需重启 Desktop。
+
+侧栏右上角会显示“索引正常 · N 路由”或“索引异常 · 场景分析已降级”。也可以在对话中调用 `business_code_intell_status` 查看索引生成时间、源码摘要、覆盖率与最近错误。
 
 ```bash
 DSH_BUSINESS_PACKAGE="$PWD/build/business-package" npm run dev

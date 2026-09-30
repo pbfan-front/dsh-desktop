@@ -2,7 +2,12 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { aboutDetail, bundledHarnessVersion } from '../src/main/version-info'
+import {
+  aboutDetail,
+  bundledBusinessBuildId,
+  bundledHarnessVersion,
+  desktopReleaseChannel
+} from '../src/main/version-info'
 
 const temporaryRoots: string[] = []
 
@@ -41,5 +46,26 @@ describe('desktop version information', () => {
     expect(aboutDetail('0.1.1', '0.1.0-rc.8', 'en')).toContain(
       'Harness is updated with DSH Desktop.'
     )
+  })
+
+  it('reports the release channel and bundled business build', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-version-info-'))
+    temporaryRoots.push(root)
+    await mkdir(join(root, 'business-package'), { recursive: true })
+    await writeFile(join(root, 'business-package', 'manifest.json'), JSON.stringify({
+      buildId: 'business-build-42'
+    }))
+    await writeFile(join(root, 'package.json'), JSON.stringify({
+      dshDesktopChannel: 'development'
+    }))
+
+    expect(bundledBusinessBuildId(root)).toBe('business-build-42')
+    expect(desktopReleaseChannel(root, true)).toBe('development')
+    expect(desktopReleaseChannel(root, false)).toBe('development')
+    expect(aboutDetail('0.1.1', '0.1.5', 'zh', {
+      channel: 'development',
+      platform: 'darwin/arm64',
+      businessBuildId: 'business-build-42'
+    })).toContain('业务 Build ID：business-build-42')
   })
 })

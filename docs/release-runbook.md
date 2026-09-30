@@ -1,5 +1,7 @@
 # Desktop release runbook
 
+正式候选版本在触发工作流前先执行 `npm run release:preflight`。原生签名验证、干净机安装、覆盖升级和卸载重装步骤统一记录在 [Desktop 正式包与干净机验收](./clean-machine-release-acceptance.md)。
+
 ## Manual workflow dispatch
 
 The `Release desktop installers` workflow accepts a `mode` on `workflow_dispatch`. `target` is always honored: `macos` does not start Windows jobs, and `windows` does not start macOS jobs.

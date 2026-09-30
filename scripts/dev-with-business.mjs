@@ -14,8 +14,8 @@ await mkdir(userRoot, { recursive: true })
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const children = new Set()
-const launch = (args, cwd, env) => {
-  const child = spawn(npm, args, { cwd, env: { ...process.env, ...env }, stdio: 'inherit' })
+const launch = (command, args, cwd, env) => {
+  const child = spawn(command, args, { cwd, env: { ...process.env, ...env }, stdio: 'inherit' })
   children.add(child)
   child.once('exit', code => {
     children.delete(child)
@@ -36,9 +36,11 @@ process.once('SIGTERM', () => stop(0))
 
 console.log(`[business:dev] app=${appUrl}`)
 console.log(`[business:dev] user-data=${userRoot}`)
-launch(['run', 'dev:local-mock'], businessRoot, { LOCAL_MOCK_OVERLAY_ROOT: userRoot })
-launch(['run', 'dev'], desktopRoot, {
+launch(npm, ['run', 'dev:local-mock'], businessRoot, { LOCAL_MOCK_OVERLAY_ROOT: userRoot })
+launch(process.execPath, [join(desktopRoot, 'scripts', 'watch-business-code-intell.mjs'), businessRoot], desktopRoot, {})
+launch(npm, ['run', 'dev'], desktopRoot, {
   DSH_BUSINESS_PACKAGE: packageRoot,
   DSH_BUSINESS_APP_URL: appUrl,
+  DSH_BUSINESS_SOURCE_ROOT: businessRoot,
   DSH_BUSINESS_USER_ROOT: userRoot
 })

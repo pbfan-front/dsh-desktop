@@ -30,9 +30,15 @@ describe('DSH Desktop client slot occupants', () => {
     expect(client).not.toContain('客户端未能发现业务预览地址。')
     expect(client).toContain("frame.dataset.dshBusinessPreviewPersistent = 'true'")
     expect(client).toContain('businessFrameParking().appendChild(frame)')
-    expect(client).toContain('return mountBusinessFrame(frameContainer, state.url)')
+    expect(client).toContain('return mountBusinessFrame(frameContainer, state.url, () =>')
     expect(client).toContain("hostWindow.addEventListener('dsh-desktop:business-preview-ready'")
     expect(client).toContain("parsed.hostname !== '127.0.0.1'")
+    expect(preload).toContain("ipcRenderer.on('business:preview-state'")
+    expect(preload).toContain("if (phase === 'ready') void publishBusinessPreviewUrl()")
+    expect(client).toContain("state.runtimeState === 'recovering'")
+    expect(client).toContain('restartBusinessPreview?.()')
+    expect(client).toContain("failureKind: 'page-load-failed'")
+    expect(client).toContain('showHarnessLog?.()')
   })
 
   it('registers one occupant per brand seat and keeps the official name mark-free', async () => {
