@@ -57,6 +57,7 @@ export function registerBusinessScenarioWorkflow(options: {
       const input = parseStartInput(context)
       const plan = parsePlan(previousOutput)
       const analysis = record(context.analysis, 'Workflow analysis result is missing.')
+      assertAnalysisQuality(analysis)
       const target = parseTarget(context.target)
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
       const created = await options.requestBusiness('/__desktop/create-profile', {
@@ -136,6 +137,19 @@ function assertPreviewVerification(value: unknown): void {
 
 function workflowGateError(message: string): { code: string; message: string; retryable: boolean } {
   return { code: 'WORKFLOW_GATE_REJECTED', message, retryable: true }
+}
+
+function assertAnalysisQuality(analysis: Record<string, unknown>): void {
+  if (!analysis.analysisPlan || typeof analysis.analysisPlan !== 'object' || Array.isArray(analysis.analysisPlan)) return
+  const qualityGate = (analysis.analysisPlan as Record<string, unknown>).qualityGate
+  if (!qualityGate || typeof qualityGate !== 'object' || Array.isArray(qualityGate)) return
+  if ((qualityGate as Record<string, unknown>).level === 'insufficient') {
+    throw {
+      code: 'WORKFLOW_ANALYSIS_INSUFFICIENT',
+      message: 'Scenario creation requires a refined target because the analysis evidence is insufficient.',
+      retryable: false
+    }
+  }
 }
 
 function parseStartInput(value: unknown): BusinessScenarioWorkflowStartInput {

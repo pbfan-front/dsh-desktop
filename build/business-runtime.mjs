@@ -682,7 +682,49 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const uniqueConfidentMatch = confidentExistingMatch && strongestMatch
       && strongestMatch.apiUrl === focusApiUrls[0]
       && (!nextMatch || strongestMatch.score - nextMatch.score >= 40)
-    if (uniqueConfidentMatch) {
+    const focusApis = focusApiUrls.map(apiUrl => apis.find(api => api.apiUrl === apiUrl)).filter(Boolean)
+    const allFocusApisGeneratable = focusApis.length > 0 && focusApis.every(api => api.canGenerate)
+    const allFocusApisHaveSourceEvidence = focusApis.length > 0 && focusApis.every(api => Array.isArray(api.evidence) && api.evidence.length > 0)
+    const qualityGaps = []
+    if (!normalizedQuery) qualityGaps.push('business-intent-empty')
+    if (!focusApis.length) qualityGaps.push('focus-api-missing')
+    if (!allFocusApisGeneratable) qualityGaps.push('focus-api-not-generatable')
+    if (!allFocusApisHaveSourceEvidence) qualityGaps.push('source-evidence-missing')
+    if (!explicitApis.length && !confidentExistingMatch) qualityGaps.push('intent-match-not-confident')
+    if (confidentExistingMatch && !uniqueConfidentMatch) qualityGaps.push('existing-scenario-match-ambiguous')
+    let qualityScore = 20
+    if (normalizedQuery) qualityScore += 10
+    if (focusApis.length) qualityScore += 15
+    if (allFocusApisGeneratable) qualityScore += 15
+    if (allFocusApisHaveSourceEvidence) qualityScore += 15
+    if (explicitApis.length) qualityScore += 25
+    else if (uniqueConfidentMatch) qualityScore += 25
+    else if (confidentExistingMatch) qualityScore += 10
+    qualityScore = Math.max(0, Math.min(100, qualityScore - (qualityGaps.includes('existing-scenario-match-ambiguous') ? 10 : 0)))
+    const ready = Boolean(normalizedQuery && focusApis.length && allFocusApisGeneratable && allFocusApisHaveSourceEvidence
+      && (explicitApis.length || uniqueConfidentMatch))
+    const reviewable = Boolean(normalizedQuery && focusApis.length && allFocusApisGeneratable && allFocusApisHaveSourceEvidence)
+    analysisPlan.qualityGate = {
+      score: qualityScore,
+      level: ready ? 'ready' : reviewable ? 'review' : 'insufficient',
+      decision: ready ? 'proceed-with-confirmation' : reviewable ? 'review-focused-evidence' : 'refine-target-before-creation',
+      autoDraftAllowed: ready && uniqueConfidentMatch,
+      gaps: qualityGaps,
+      factors: {
+        explicitApiCount: explicitApis.length,
+        focusApiCount: focusApis.length,
+        focusApisGeneratable: allFocusApisGeneratable,
+        focusApisHaveSourceEvidence: allFocusApisHaveSourceEvidence,
+        confidentExistingMatch,
+        uniqueConfidentMatch
+      },
+      guidance: ready
+        ? 'Confirm the focused plan; existing workflow write and preview gates still apply.'
+        : reviewable
+          ? 'Review focused evidence and alternatives. Request full workflow detail only when the bounded evidence remains ambiguous.'
+          : 'Do not create a scenario yet. Refine the target page/API or repair the reported evidence gap.'
+    }
+    if (analysisPlan.qualityGate.autoDraftAllowed) {
       const draftHash = contentHash({ routePath: route.path, query: input.query || '', apiUrl: strongestMatch.apiUrl, scenarioId: strongestMatch.scenarioId }).slice(0, 12)
       analysisPlan.suggestedPlan = {
         kind: 'reuse-existing-scenario',

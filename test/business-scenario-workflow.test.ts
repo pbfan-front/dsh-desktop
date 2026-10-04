@@ -149,6 +149,29 @@ describe('business scenario workflow', () => {
     expect(requestBusiness).toHaveBeenCalledTimes(2)
   })
 
+  it('blocks writes deterministically when analysis quality is insufficient', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-insufficient-analysis' })
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      return {
+        evidenceId: 'evidence-insufficient',
+        analysisPlan: { qualityGate: { level: 'insufficient', gaps: ['source-evidence-missing'] } }
+      }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+
+    const analyzed = await start(startInput)
+    const failed = await runtime.resume(analyzed.id, plan)
+
+    expect(failed.status).toBe('failed')
+    expect(failed.currentStepId).toBe('create-profile')
+    expect(failed.steps[2]?.error).toMatchObject({
+      code: 'WORKFLOW_ANALYSIS_INSUFFICIENT',
+      retryable: false
+    })
+    expect(requestBusiness).toHaveBeenCalledTimes(2)
+  })
+
   it('omits an absent optional sessionId from the persisted workflow context', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-no-session' })
     const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target' ? resolvedTarget : ({ evidenceId: 'evidence-1' }))
