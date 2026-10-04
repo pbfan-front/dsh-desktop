@@ -31,6 +31,11 @@ export interface BusinessPluginWorkflowDeclaration {
   }>
 }
 
+export interface BusinessPluginTargetAlias {
+  routePath: string
+  aliases: string[]
+}
+
 const capabilitySet = new Set<string>(businessPluginCapabilities)
 const safeId = /^[a-z0-9][a-z0-9._-]{1,127}$/
 const workflowStepTypes = new Set(['deterministic', 'agent', 'checkpoint'])
@@ -119,6 +124,26 @@ export function parseBusinessPluginWorkflows(manifest: Record<string, unknown>):
       ...(compatibleRunVersions ? { compatibleRunVersions } : {}),
       steps: parsedSteps
     }
+  })
+}
+
+export function parseBusinessPluginTargetAliases(manifest: Record<string, unknown>): BusinessPluginTargetAlias[] {
+  if (manifest.targetAliases === undefined) return []
+  if (!Array.isArray(manifest.targetAliases) || manifest.targetAliases.length > 256) {
+    throw new Error('Business plugin targetAliases must be an array of at most 256 route declarations.')
+  }
+  const routes = new Set<string>()
+  return manifest.targetAliases.map((value) => {
+    const declaration = object(value, 'Business plugin target alias must be an object.')
+    const routePath = safeText(declaration.routePath, 'Business plugin target alias routePath is missing.', 500)
+    if (!routePath.startsWith('/') || routePath.startsWith('//') || routes.has(routePath)) {
+      throw new Error(`Business plugin target alias routePath is unsafe or duplicated: ${routePath}`)
+    }
+    routes.add(routePath)
+    const aliases = stringList(declaration.aliases, `Business plugin target aliases for ${routePath}`, 32, 200)
+      .map(alias => alias.trim())
+    if (aliases.length === 0) throw new Error(`Business plugin target aliases for ${routePath} cannot be empty.`)
+    return { routePath, aliases }
   })
 }
 

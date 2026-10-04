@@ -392,6 +392,85 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return [...new Set(fields)].slice(0, 120)
   }
+  const routeTitle = route => String(route.title || route.comment || route.name || '').trim()
+  const routeCandidate = route => ({ routePath: route.path, ...(routeTitle(route) ? { pageTitle: routeTitle(route) } : {}) })
+  const normalizedHint = value => String(value || '').toLowerCase().replace(/[\s/\\?&#=_-]+/gu, '')
+  const configuredTargetAliases = Array.isArray(manifest.targetAliases) ? manifest.targetAliases : []
+  const routeAliases = route => {
+    const configured = configuredTargetAliases.find(item => item?.routePath === route.path)
+    return [routeTitle(route), route.name, route.path, route.component, ...(Array.isArray(configured?.aliases) ? configured.aliases : [])]
+      .map(normalizedHint).filter(Boolean)
+  }
+  const observedRoutePath = sessionId => {
+    const raw = String(pageObservations.get(sessionId)?.route || '')
+    const hashRoute = raw.includes('#') ? raw.slice(raw.indexOf('#') + 1) : raw
+    const routePath = hashRoute.split('?')[0]
+    return safeRoute(routePath) ? routePath : undefined
+  }
+  const targetResolutionError = (code, message, candidates = []) => {
+    const error = new Error(`${code}: ${message}${candidates.length ? ` Candidates: ${JSON.stringify(candidates.slice(0, 8))}` : ''}`)
+    error.code = code
+    return error
+  }
+  const resolveTarget = async (input, sessionId = 'default') => {
+    await refreshCodeIntell()
+    if (codeIntellStatus.state !== 'ready') throw new Error(`CodeIntell unavailable: ${codeIntellStatus.error}`)
+    const explicitRoute = String(input?.routePath || '').trim()
+    const pageHint = String(input?.targetPage || '').trim()
+    const query = String(input?.query || '').trim()
+    const currentRoute = observedRoutePath(sessionId)
+    const exactRoute = routePath => codeRoutes.filter(route => route.path === routePath)
+    const result = (route, source, confidence, candidates = [route]) => ({
+      ...routeCandidate(route),
+      source,
+      confidence,
+      ...(currentRoute ? { currentRoute } : {}),
+      candidates: candidates.map(routeCandidate)
+    })
+
+    if (explicitRoute) {
+      if (!safeRoute(explicitRoute)) throw targetResolutionError('E_TARGET_ROUTE_INVALID', 'routePath must be a safe absolute business route.')
+      const matches = exactRoute(explicitRoute)
+      if (matches.length === 1) return result(matches[0], 'explicit-route', 'high')
+      throw targetResolutionError('E_TARGET_ROUTE_NOT_FOUND', `No exact CodeIntell route matches ${explicitRoute}.`,
+        codeRoutes.filter(route => route.path.includes(explicitRoute) || explicitRoute.includes(route.path)))
+    }
+
+    const matchHint = (hint, source) => {
+      const normalized = normalizedHint(hint)
+      if (!normalized) return undefined
+      const exact = codeRoutes.filter(route => routeAliases(route).includes(normalized))
+      if (exact.length === 1) return result(exact[0], source, 'high')
+      if (exact.length > 1) throw targetResolutionError('E_TARGET_ROUTE_AMBIGUOUS', `Multiple routes exactly match ${hint}.`, exact)
+      const fuzzy = codeRoutes.filter(route => {
+        return routeAliases(route).some(alias => alias.length >= 2 && (normalized.includes(alias) || alias.includes(normalized)))
+      }).sort((left, right) => Math.max(...routeAliases(right).map(alias => alias.length))
+        - Math.max(...routeAliases(left).map(alias => alias.length)))
+      if (fuzzy.length === 1) return result(fuzzy[0], source, source === 'page-hint' ? 'high' : 'medium')
+      if (fuzzy.length > 1) {
+        const topLength = Math.max(...routeAliases(fuzzy[0]).filter(alias => normalized.includes(alias) || alias.includes(normalized)).map(alias => alias.length))
+        const top = fuzzy.filter(route => Math.max(...routeAliases(route).filter(alias => normalized.includes(alias) || alias.includes(normalized)).map(alias => alias.length)) === topLength)
+        if (top.length === 1) return result(top[0], source, 'medium', fuzzy)
+        throw targetResolutionError('E_TARGET_ROUTE_AMBIGUOUS', `The target ${hint} matches multiple business pages. Select an exact route or page.`, fuzzy)
+      }
+      return undefined
+    }
+
+    if (pageHint) {
+      const pageTarget = matchHint(pageHint, 'page-hint')
+      if (pageTarget) return pageTarget
+      throw targetResolutionError('E_TARGET_PAGE_NOT_FOUND', `No CodeIntell route matches targetPage ${pageHint}.`)
+    }
+
+    const intentTarget = matchHint(query, 'query-intent')
+    if (intentTarget) return intentTarget
+
+    if (currentRoute) {
+      const currentMatches = exactRoute(currentRoute)
+      if (currentMatches.length === 1) return result(currentMatches[0], 'current-preview', 'medium')
+    }
+    throw targetResolutionError('E_TARGET_ROUTE_REQUIRED', 'The business intent does not identify one page and no valid current preview is available. Provide routePath or targetPage.')
+  }
   const analyzeTarget = async (input, sessionId = 'default') => {
     await refreshCodeIntell()
     if (codeIntellStatus.state !== 'ready') throw new Error(`CodeIntell unavailable: ${codeIntellStatus.error}`)
@@ -832,6 +911,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             return respond(res, 409, { error: 'Legacy scenario tools are disabled in workflow mode. Use business_start_scenario_workflow or switch explicitly to legacy mode.' })
           }
           await auditWorkflowMode({ mode: internalWorkflow ? 'workflow' : 'legacy', action: url.pathname, sessionId, outcome: 'allowed' })
+        }
+        if (url.pathname === '/__desktop/resolve-target' && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }
+          try { return respond(res, 200, await resolveTarget(JSON.parse(body), sessionId)) } catch (error) { return respond(res, 422, { error: error.message, code: error.code }) }
         }
         if (url.pathname === '/__desktop/analyze-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }

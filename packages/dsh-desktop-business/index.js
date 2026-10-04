@@ -45,11 +45,12 @@ export async function apply(ctx) {
     }
   }), 'dsh-desktop-business: preview discovery route')
   const specs = [
-    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. It performs evidence analysis and pauses before any write. Return the run ID and analysis to the user, prepare a reviewed plan, then call business_resume_scenario_workflow. If this entry is unavailable, inspect business_workflow_mode and only enable legacy mode as an explicit controlled fallback.', '/__desktop/workflow/start-scenario', {
-      routePath: { type: 'string', required: true, description: 'Exact business hash route beginning with /.' },
+    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. It performs evidence analysis and pauses before any write. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
+      routePath: { type: 'string', description: 'Optional exact target business hash route beginning with /. Omit when the intent or current preview should resolve it.' },
+      targetPage: { type: 'string', description: 'Optional target business page name or route hint. This takes priority over the current preview page.' },
       query: { type: 'string', required: true, description: 'Business scenario intent used for evidence analysis.' },
       apiUrlsJson: { type: 'string', description: 'Optional JSON array of exact API URLs already supported by source evidence.' }
-    }, args => ({ routePath: args.routePath, query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
+    }, args => ({ ...(args.routePath ? { routePath: args.routePath } : {}), ...(args.targetPage ? { targetPage: args.targetPage } : {}), query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
     ['business_resume_scenario_workflow', 'Resume a paused stateful scenario workflow. At confirm-plan pass checkpointJson with profileId, label, page and scenarios. At wait-for-preview call only after the page settles and pass route, containsText and absentText. The workflow preserves its timeline and deterministic gates.', '/__desktop/workflow/resume', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
       checkpointJson: { type: 'string', required: true, description: 'JSON object for the current checkpoint.' }

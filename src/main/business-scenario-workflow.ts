@@ -1,6 +1,7 @@
 import type {
   BusinessScenarioWorkflowPlan,
   BusinessScenarioWorkflowStartInput,
+  BusinessScenarioWorkflowTarget,
   BusinessScenarioWorkflowVerification,
   BusinessWorkflowDefinition,
   BusinessWorkflowRun
@@ -13,7 +14,7 @@ export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
 const defaultDefinition: BusinessWorkflowDefinition = {
   id: BUSINESS_SCENARIO_WORKFLOW_ID,
-  version: '1.0.0',
+  version: '1.1.0',
   title: '创建并验证业务体验场景',
   steps: [
     { id: 'analyze-target', type: 'deterministic', title: '分析页面与接口证据' },
@@ -37,20 +38,26 @@ export function registerBusinessScenarioWorkflow(options: {
   options.runtime.registerWorkflow(definition, {
     'analyze-target': async ({ context }) => {
       const input = parseStartInput(context)
+      const target = await options.requestBusiness('/__desktop/resolve-target', {
+        ...(input.routePath ? { routePath: input.routePath } : {}),
+        ...(input.targetPage ? { targetPage: input.targetPage } : {}),
+        query: input.query
+      }, input.sessionId) as BusinessScenarioWorkflowTarget
       const analysis = await options.requestBusiness('/__desktop/analyze-target', {
-        routePath: input.routePath,
+        routePath: target.routePath,
         query: input.query,
         apiUrls: input.apiUrls ?? []
       }, input.sessionId)
       return {
         output: analysis,
-        contextPatch: { analysis }
+        contextPatch: { analysis, target }
       }
     },
     'create-profile': async ({ context, previousOutput }) => {
       const input = parseStartInput(context)
       const plan = parsePlan(previousOutput)
       const analysis = record(context.analysis, 'Workflow analysis result is missing.')
+      const target = parseTarget(context.target)
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
       const created = await options.requestBusiness('/__desktop/create-profile', {
         evidenceId,
@@ -58,7 +65,7 @@ export function registerBusinessScenarioWorkflow(options: {
           id: plan.profileId,
           label: plan.label,
           branchLabel: plan.label,
-          routePath: input.routePath,
+          routePath: target.routePath,
           page: plan.page
         },
         scenarios: plan.scenarios
@@ -133,13 +140,32 @@ function workflowGateError(message: string): { code: string; message: string; re
 
 function parseStartInput(value: unknown): BusinessScenarioWorkflowStartInput {
   const input = record(value, 'Scenario workflow input must be an object.')
-  const routePath = text(input.routePath, 'routePath is required.', 500)
-  if (!routePath.startsWith('/') || routePath.startsWith('//')) throw new Error('routePath must be a safe absolute business route.')
+  const routePath = input.routePath === undefined ? undefined : text(input.routePath, 'routePath is invalid.', 500)
+  if (routePath && (!routePath.startsWith('/') || routePath.startsWith('//'))) throw new Error('routePath must be a safe absolute business route.')
+  const targetPage = input.targetPage === undefined ? undefined : text(input.targetPage, 'targetPage is invalid.', 200)
   const query = text(input.query, 'query is required.', 1000)
   const apiUrls = input.apiUrls === undefined ? [] : stringArray(input.apiUrls, 'apiUrls', 12, 500)
   const sessionId = input.sessionId === undefined ? undefined : text(input.sessionId, 'sessionId is invalid.', 128)
   if (sessionId && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(sessionId)) throw new Error('sessionId is unsafe.')
-  return { routePath, query, apiUrls, ...(sessionId ? { sessionId } : {}) }
+  return {
+    ...(routePath ? { routePath } : {}),
+    ...(targetPage ? { targetPage } : {}),
+    query,
+    apiUrls,
+    ...(sessionId ? { sessionId } : {})
+  }
+}
+
+function parseTarget(value: unknown): BusinessScenarioWorkflowTarget {
+  const target = record(value, 'Workflow target resolution is missing.')
+  const routePath = text(target.routePath, 'Resolved target routePath is missing.', 500)
+  if (!routePath.startsWith('/') || routePath.startsWith('//')) throw new Error('Resolved target routePath is unsafe.')
+  const sources = ['explicit-route', 'page-hint', 'query-intent', 'current-preview'] as const
+  const confidences = ['high', 'medium'] as const
+  if (!sources.includes(target.source as typeof sources[number])) throw new Error('Resolved target source is invalid.')
+  if (!confidences.includes(target.confidence as typeof confidences[number])) throw new Error('Resolved target confidence is invalid.')
+  if (!Array.isArray(target.candidates)) throw new Error('Resolved target candidates are invalid.')
+  return target as unknown as BusinessScenarioWorkflowTarget
 }
 
 function parsePlan(value: unknown): BusinessScenarioWorkflowPlan {

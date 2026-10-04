@@ -73,10 +73,20 @@ export interface BusinessWorkflowRun {
 }
 
 export interface BusinessScenarioWorkflowStartInput {
-  routePath: string
+  routePath?: string
+  targetPage?: string
   query: string
   apiUrls?: string[]
   sessionId?: string
+}
+
+export interface BusinessScenarioWorkflowTarget {
+  routePath: string
+  pageTitle?: string
+  source: 'explicit-route' | 'page-hint' | 'query-intent' | 'current-preview'
+  confidence: 'high' | 'medium'
+  currentRoute?: string
+  candidates: Array<{ routePath: string; pageTitle?: string }>
 }
 
 export interface BusinessScenarioWorkflowPlan {

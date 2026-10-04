@@ -85,6 +85,7 @@ await writeFile(join(destination, 'manifest.json'), JSON.stringify({
   pluginId: pluginConfig.pluginId, projectId: pluginConfig.projectId, displayName: pluginConfig.displayName,
   capabilities: pluginConfig.capabilities,
   workflows: pluginConfig.workflows || [],
+  targetAliases: pluginConfig.targetAliases || [],
   packageVersion,
   compatibility: pluginConfig.compatibility,
   buildId, businessCommit: commit, workingTree: dirty, testProfiles: Boolean(profilesArg),

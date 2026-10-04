@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseBusinessPluginWorkflows } from '../src/main/business-plugin-contract'
+import { parseBusinessPluginTargetAliases, parseBusinessPluginWorkflows } from '../src/main/business-plugin-contract'
 
 const workflow = {
   id: 'business-scenario-create',
@@ -39,5 +39,28 @@ describe('business plugin workflow declarations', () => {
     const parsed = parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['0.9.0'] }] })
     expect(parsed[0]?.compatibleRunVersions).toEqual(['0.9.0'])
     expect(() => parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['1.0.0'] }] })).toThrow('must not repeat')
+  })
+})
+
+describe('business plugin target aliases', () => {
+  it('accepts declarative business page aliases', () => {
+    expect(parseBusinessPluginTargetAliases({
+      targetAliases: [{ routePath: '/loan/receiveAcct', aliases: ['收款账户', '借款账户'] }]
+    })).toEqual([{ routePath: '/loan/receiveAcct', aliases: ['收款账户', '借款账户'] }])
+  })
+
+  it('rejects unsafe, duplicated or empty route declarations', () => {
+    expect(() => parseBusinessPluginTargetAliases({
+      targetAliases: [{ routePath: '//evil', aliases: ['页面'] }]
+    })).toThrow('unsafe')
+    expect(() => parseBusinessPluginTargetAliases({
+      targetAliases: [
+        { routePath: '/loan/receiveAcct', aliases: ['收款账户'] },
+        { routePath: '/loan/receiveAcct', aliases: ['借款账户'] }
+      ]
+    })).toThrow('duplicated')
+    expect(() => parseBusinessPluginTargetAliases({
+      targetAliases: [{ routePath: '/loan/receiveAcct', aliases: [] }]
+    })).toThrow('cannot be empty')
   })
 })

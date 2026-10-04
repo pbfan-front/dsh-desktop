@@ -31,6 +31,13 @@ check(await sha256(join(packageRoot, 'web', manifest.businessPath, 'index.html')
 check(await sha256(join(packageRoot, 'source', '.codeIntell', 'index.json')) === manifest.provenance?.codeIntellIndexSha256, 'packaged CodeIntell index does not match the manifest')
 const codeIntellRoot = join(packageRoot, 'source', '.codeIntell')
 const lifecycleFile = join(codeIntellRoot, 'lifecycle.json')
+const packagedRoutes = JSON.parse(await readFile(join(codeIntellRoot, 'routes.json'), 'utf8'))
+const routePaths = new Set(Array.isArray(packagedRoutes) ? packagedRoutes.map(route => route?.path) : [])
+check(Array.isArray(manifest.targetAliases), 'manifest targetAliases declaration is missing')
+for (const declaration of manifest.targetAliases || []) {
+  check(typeof declaration?.routePath === 'string' && routePaths.has(declaration.routePath), `target alias route is missing from CodeIntell: ${String(declaration?.routePath)}`)
+  check(Array.isArray(declaration?.aliases) && declaration.aliases.length > 0, `target alias list is empty: ${String(declaration?.routePath)}`)
+}
 let lifecycle
 try {
   lifecycle = JSON.parse(await readFile(lifecycleFile, 'utf8'))

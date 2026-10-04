@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { parseBusinessPluginIdentity, parseBusinessPluginWorkflows, type BusinessPluginIdentity } from './business-plugin-contract'
+import { parseBusinessPluginIdentity, parseBusinessPluginTargetAliases, parseBusinessPluginWorkflows, type BusinessPluginIdentity } from './business-plugin-contract'
 
 interface BusinessPackageManifest {
   type?: unknown
@@ -68,6 +68,7 @@ export async function verifyInstallableBusinessPackage(
   if (manifest.schemaVersion !== 2) throw new Error('Only business package schemaVersion 2 can be installed independently.')
   const identity = parseBusinessPluginIdentity(manifest as Record<string, unknown>)
   parseBusinessPluginWorkflows(manifest as Record<string, unknown>)
+  parseBusinessPluginTargetAliases(manifest as Record<string, unknown>)
   const buildId = safeBuildId(manifest.buildId)
   if (typeof manifest.packageVersion !== 'string' || manifest.packageVersion.length === 0) {
     throw new Error('Business package has no packageVersion.')
