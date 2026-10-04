@@ -97,7 +97,8 @@ export interface BusinessScenarioWorkflowPlan {
     id: string
     apiUrl: string
     label?: string
-    data: Record<string, unknown>
+    data?: Record<string, unknown>
+    sourceScenarioId?: string
   }>
 }
 

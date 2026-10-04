@@ -112,6 +112,24 @@ describe('business scenario workflow', () => {
       query: '创建收款账户校验失败场景',
       apiUrls: []
     }, 'session-1')
+
+    const draft = {
+      profileId: 'receive_account_failed',
+      label: '收款账户校验失败',
+      page: 'receiveAcct',
+      scenarios: [{
+        id: 'receive_account_failed_data',
+        apiUrl: '/withdrawal/inputReceiveAcctCheck.json',
+        label: '失败返回',
+        sourceScenarioId: '失败返回'
+      }]
+    }
+    const applied = await runtime.resume(analyzed.id, draft)
+    expect(applied.status).toBe('waiting_for_user')
+    expect(requestBusiness).toHaveBeenNthCalledWith(3, '/__desktop/create-profile', expect.objectContaining({
+      scenarios: draft.scenarios,
+      profile: expect.objectContaining({ routePath: '/loan/receiveAcct' })
+    }), 'session-1')
   })
 
   it('stops safely before writes when the confirmed plan is invalid', async () => {

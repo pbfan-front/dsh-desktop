@@ -14,7 +14,7 @@ export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
 const defaultDefinition: BusinessWorkflowDefinition = {
   id: BUSINESS_SCENARIO_WORKFLOW_ID,
-  version: '1.1.0',
+  version: '1.2.0',
   title: '创建并验证业务体验场景',
   steps: [
     { id: 'analyze-target', type: 'deterministic', title: '分析页面与接口证据' },
@@ -179,11 +179,19 @@ function parsePlan(value: unknown): BusinessScenarioWorkflowPlan {
     const scenario = record(value, 'Each scenario must be an object.')
     const id = text(scenario.id, 'Scenario id is required.', 128)
     if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/.test(id)) throw new Error('Scenario id is unsafe.')
+    const data = scenario.data === undefined ? undefined : record(scenario.data, 'Scenario data must be an object.')
+    const sourceScenarioId = scenario.sourceScenarioId === undefined
+      ? undefined
+      : text(scenario.sourceScenarioId, 'Scenario sourceScenarioId is invalid.', 128)
+    if ((data === undefined) === (sourceScenarioId === undefined)) {
+      throw new Error('Each scenario must provide exactly one of data or sourceScenarioId.')
+    }
     return {
       id,
       apiUrl: text(scenario.apiUrl, 'Scenario apiUrl is required.', 500),
       ...(scenario.label === undefined ? {} : { label: text(scenario.label, 'Scenario label is invalid.', 200) }),
-      data: record(scenario.data, 'Scenario data must be an object.')
+      ...(data === undefined ? {} : { data }),
+      ...(sourceScenarioId === undefined ? {} : { sourceScenarioId })
     }
   })
   return {

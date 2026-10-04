@@ -51,7 +51,7 @@ export async function apply(ctx) {
       query: { type: 'string', required: true, description: 'Business scenario intent used for evidence analysis.' },
       apiUrlsJson: { type: 'string', description: 'Optional JSON array of exact API URLs already supported by source evidence.' }
     }, args => ({ ...(args.routePath ? { routePath: args.routePath } : {}), ...(args.targetPage ? { targetPage: args.targetPage } : {}), query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
-    ['business_resume_scenario_workflow', 'Resume a paused stateful scenario workflow. At confirm-plan pass checkpointJson with profileId, label, page and scenarios. At wait-for-preview call only after the page settles and pass route, containsText and absentText. The workflow preserves its timeline and deterministic gates.', '/__desktop/workflow/resume', {
+    ['business_resume_scenario_workflow', 'Resume a paused stateful scenario workflow. At confirm-plan review analysis.analysisPlan.suggestedPlan when present, then pass checkpointJson with profileId, label, page and scenarios. A scenario must contain either object data for a new Mock state or sourceScenarioId to clone an existing reviewed Scenario, never both. At wait-for-preview call only after the page settles and pass route, containsText and absentText. The workflow preserves its timeline and deterministic gates.', '/__desktop/workflow/resume', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
       checkpointJson: { type: 'string', required: true, description: 'JSON object for the current checkpoint.' }
     }, args => ({ runId: args.runId, checkpointOutput: JSON.parse(args.checkpointJson) })],

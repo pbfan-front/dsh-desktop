@@ -677,6 +677,27 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         ? 'Review the matched existing scenarios before proposing new Mock data. Keep all writes behind the workflow checkpoint.'
         : 'Start with focusApiUrls. Search source only when the bounded evidence packet cannot represent the requested business state.'
     }
+    const strongestMatch = existingScenarioMatches[0]
+    const nextMatch = existingScenarioMatches[1]
+    const uniqueConfidentMatch = confidentExistingMatch && strongestMatch
+      && strongestMatch.apiUrl === focusApiUrls[0]
+      && (!nextMatch || strongestMatch.score - nextMatch.score >= 40)
+    if (uniqueConfidentMatch) {
+      const draftHash = contentHash({ routePath: route.path, query: input.query || '', apiUrl: strongestMatch.apiUrl, scenarioId: strongestMatch.scenarioId }).slice(0, 12)
+      analysisPlan.suggestedPlan = {
+        kind: 'reuse-existing-scenario',
+        requiresConfirmation: true,
+        profileId: `scenario_${draftHash}`,
+        label: String(input.query || strongestMatch.label || '业务体验场景').slice(0, 200),
+        page: (routeToken || 'business').slice(0, 64),
+        scenarios: [{
+          id: `scenario_${draftHash}`,
+          apiUrl: strongestMatch.apiUrl,
+          label: String(strongestMatch.label || strongestMatch.scenarioId).slice(0, 200),
+          sourceScenarioId: strongestMatch.scenarioId
+        }]
+      }
+    }
     const evidenceId = randomUUID()
     const result = { evidenceId, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), query: input.query || '',
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
@@ -1034,7 +1055,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const mutations = []
           const seenMockPaths = new Set()
           for (const item of input.scenarios) {
-            if (!safeId(item?.id) || !safeText(item?.apiUrl, 240) || !safeText(item?.label || item?.id) || !plainObject(item?.data)) return respond(res, 422, { error: 'Each scenario needs a valid ASCII id, apiUrl, label and object data' })
+            const hasData = plainObject(item?.data)
+            const hasSourceScenario = safeText(item?.sourceScenarioId, 128)
+            if (!safeId(item?.id) || !safeText(item?.apiUrl, 240) || !safeText(item?.label || item?.id)
+              || hasData === Boolean(hasSourceScenario)) return respond(res, 422, { error: 'Each scenario needs a valid ASCII id, apiUrl, label and exactly one of object data or sourceScenarioId' })
             const apiEvidence = analysis.apis.get(item.apiUrl)
             if (!apiEvidence) return respond(res, 422, { error: `API was not established by business_analyze_target: ${item.apiUrl}` })
             const relativePath = apiMockRelative(item.apiUrl)
@@ -1050,10 +1074,13 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
                 existing = { file: join(userRoot, relativePath), config: generated.config }
               } catch (error) { return respond(res, 422, { error: error.message }) }
             }
-            const template = existing.config.baseData || scenarioArray(existing.config)[0]?.data
+            const existingScenarios = scenarioArray(existing.config)
+            const sourceScenario = hasSourceScenario ? existingScenarios.find(value => value.id === item.sourceScenarioId) : undefined
+            if (hasSourceScenario && !sourceScenario) return respond(res, 422, { error: `Source Scenario does not exist for ${item.apiUrl}: ${item.sourceScenarioId}` })
+            const template = existing.config.baseData || existingScenarios[0]?.data
             let data
-            try { data = normalizeScenarioData(item.data, template, item.apiUrl) } catch (error) { return respond(res, 422, { error: error.message }) }
-            const scenarios = scenarioArray(existing.config).filter(value => value.id !== item.id)
+            try { data = normalizeScenarioData(sourceScenario ? sourceScenario.data : item.data, template, item.apiUrl) } catch (error) { return respond(res, 422, { error: error.message }) }
+            const scenarios = existingScenarios.filter(value => value.id !== item.id)
             scenarios.push({ id: item.id, label: item.label || item.id, data })
             const sourceMock = await readSourceMock(relativePath)
             mutations.push({ file: join(userRoot, relativePath), value: {

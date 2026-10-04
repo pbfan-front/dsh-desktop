@@ -122,6 +122,26 @@ try {
   assert.equal(receiveAccountAnalysis.analysisPlan.confidence, 'medium', JSON.stringify(receiveAccountAnalysis.analysisPlan))
   assert.ok(receiveAccountAnalysis.analysisPlan.existingScenarioMatches.some(item => item.scenarioId === '失败返回'), JSON.stringify(receiveAccountAnalysis.analysisPlan))
   assert.equal(receiveAccountAnalysis.analysisPlan.repositorySearch, 'not-needed')
+  assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.kind, 'reuse-existing-scenario', JSON.stringify(receiveAccountAnalysis.analysisPlan))
+  assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.requiresConfirmation, true)
+  assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.scenarios?.[0]?.sourceScenarioId, '失败返回')
+  const draftPlan = receiveAccountAnalysis.analysisPlan.suggestedPlan
+  const missingDraftSourceResponse = await get('/__desktop/create-profile', { method: 'POST', headers, body: JSON.stringify({
+    evidenceId: receiveAccountAnalysis.evidenceId,
+    profile: { id: 'missing_draft_source', label: 'Missing draft source', page: draftPlan.page, routePath: '/loan/receiveAcct' },
+    scenarios: [{ ...draftPlan.scenarios[0], id: 'missing_draft_source_data', sourceScenarioId: '不存在的场景' }]
+  }) })
+  assert.equal(missingDraftSourceResponse.status, 422)
+  assert.match((await missingDraftSourceResponse.json()).error, /Source Scenario does not exist/)
+  const draftCreateResponse = await get('/__desktop/create-profile', { method: 'POST', headers, body: JSON.stringify({
+    evidenceId: receiveAccountAnalysis.evidenceId,
+    profile: { id: draftPlan.profileId, label: draftPlan.label, page: draftPlan.page, routePath: '/loan/receiveAcct' },
+    scenarios: draftPlan.scenarios
+  }) })
+  const draftCreated = await draftCreateResponse.json()
+  assert.equal(draftCreateResponse.status, 201, JSON.stringify(draftCreated))
+  assert.equal(draftCreated.validation?.requests?.[0]?.scenarioId, draftPlan.scenarios[0].id)
+  assert.equal((await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: draftCreated.operationId }) })).status, 200)
   const cachedReceiptAnalysis = await (await get('/__desktop/analyze-target', {
     method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
   })).json()
