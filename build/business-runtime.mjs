@@ -629,11 +629,59 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     apis.sort((a, b) => b.score - a.score)
     apis.splice(20)
     if (!apis.length) throw new Error(`CodeIntell found no existing API mocks for ${route.path}`)
+    const normalizedQuery = normalizedHint(input.query)
+    const scenarioIntentMatch = scenario => {
+      const labels = [...new Set([scenario.label, scenario.id].map(normalizedHint).filter(Boolean))]
+      let score = 0
+      const reasons = []
+      for (const label of labels) {
+        if (label.length >= 2 && normalizedQuery.includes(label)) {
+          score = Math.max(score, 180)
+          reasons.push('full-label')
+        }
+        const core = label
+          .replace(/^(?:体验平台|默认)/u, '')
+          .replace(/(?:返回|响应|数据|场景|mock)$/iu, '')
+        if (core.length >= 2 && normalizedQuery.includes(core)) {
+          score = Math.max(score, 120)
+          reasons.push('business-state')
+        }
+        const bigrams = new Set(Array.from({ length: Math.max(0, label.length - 1) }, (_, index) => label.slice(index, index + 2)))
+        const overlap = [...bigrams].filter(token => normalizedQuery.includes(token))
+        if (overlap.length >= 2) {
+          score = Math.max(score, Math.min(110, 60 + overlap.length * 10))
+          reasons.push('phrase-overlap')
+        }
+      }
+      return score ? { score, reasons: [...new Set(reasons)] } : undefined
+    }
+    const existingScenarioMatches = apis.flatMap(api => api.scenarios.flatMap(scenario => {
+      const match = scenarioIntentMatch(scenario)
+      return match ? [{ apiUrl: api.apiUrl, scenarioId: scenario.id, label: scenario.label, score: api.score + match.score,
+        matchScore: match.score, reasons: match.reasons }] : []
+    })).sort((left, right) => right.score - left.score).slice(0, 12)
+    const matchedApiUrls = [...new Set(existingScenarioMatches.map(item => item.apiUrl))]
+    const confidentExistingMatch = (existingScenarioMatches[0]?.matchScore || 0) >= 120
+    const focusApiUrls = explicitApis.length
+      ? [...new Set(explicitApis.filter(apiUrl => apis.some(api => api.apiUrl === apiUrl)))]
+      : matchedApiUrls.length ? matchedApiUrls.slice(0, 6) : apis.slice(0, 6).map(api => api.apiUrl)
+    const analysisPlan = {
+      strategy: explicitApis.length ? 'explicit-api' : existingScenarioMatches.length ? 'existing-scenario-match' : 'evidence-ranked',
+      confidence: explicitApis.length ? 'high' : confidentExistingMatch ? 'medium' : 'low',
+      focusApiUrls,
+      alternativeApiUrls: apis.map(api => api.apiUrl).filter(apiUrl => !focusApiUrls.includes(apiUrl)),
+      existingScenarioMatches,
+      evidenceCandidateCount: apis.length,
+      repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
+      guidance: existingScenarioMatches.length
+        ? 'Review the matched existing scenarios before proposing new Mock data. Keep all writes behind the workflow checkpoint.'
+        : 'Start with focusApiUrls. Search source only when the bounded evidence packet cannot represent the requested business state.'
+    }
     const evidenceId = randomUUID()
     const result = { evidenceId, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), query: input.query || '',
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
       routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })),
-      apis,
+      apis, analysisPlan,
       acceleration
     }
     analysisEvidence.set(evidenceId, { routePath: route.path,
