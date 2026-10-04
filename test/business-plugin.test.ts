@@ -51,6 +51,15 @@ describe('business Harness plugin', () => {
         },
         required: ['runId'],
       })
+      const analysisModeTool = definitions.find(tool => tool.name === 'business_set_analysis_mode')
+      expect(analysisModeTool.parameters).toMatchObject({
+        type: 'object',
+        properties: {
+          mode: { type: 'string', enum: ['strict', 'assisted'] },
+          sessionReuse: { type: 'boolean' },
+        },
+        required: ['mode'],
+      })
       const analysis = {
         apis: Array.from({ length: 8 }, (_, index) => ({
           apiUrl: `/api/${index}.json`,

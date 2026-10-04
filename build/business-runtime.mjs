@@ -83,6 +83,12 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   }
   await refreshCodeIntell(true)
   const analysisEvidence = new Map()
+  const sessionAnalysisReuse = new Map()
+  let analysisMutationRevision = 0
+  const invalidateSessionAnalysisReuse = () => {
+    analysisMutationRevision += 1
+    sessionAnalysisReuse.clear()
+  }
   const workflowRequests = new Map()
   const handleWorkflowResponse = message => {
     if (message?.type !== 'workflow-response' || typeof message.id !== 'string') return
@@ -190,9 +196,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const readAnalysisPreferences = async () => {
     try {
       const value = JSON.parse(await readFile(analysisPreferenceFile, 'utf8'))
-      return { schemaVersion: 1, mode: value.mode === 'assisted' ? 'assisted' : 'strict' }
+      return { schemaVersion: 1, mode: value.mode === 'assisted' ? 'assisted' : 'strict', sessionReuse: value.sessionReuse !== false }
     } catch (error) {
-      if (error.code === 'ENOENT') return { schemaVersion: 1, mode: 'strict' }
+      if (error.code === 'ENOENT') return { schemaVersion: 1, mode: 'strict', sessionReuse: true }
       throw error
     }
   }
@@ -480,6 +486,40 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const queryScore = (text, points = 40, limit = 120) => Math.min(limit,
       queryTerms.reduce((score, term) => score + (String(text).toLowerCase().includes(term) ? points : 0), 0))
     if (!safeRoute(routePath)) throw new Error('routePath must be a safe absolute business route')
+    const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
+    const preferences = await readAnalysisPreferences()
+    const reuseKey = contentHash({
+      sessionId,
+      sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
+      analysisMode: preferences.mode,
+      analysisMutationRevision,
+      routePath,
+      normalizedQuery: normalizedHint(query),
+      explicitApis: [...explicitApis].filter(value => typeof value === 'string').sort()
+    })
+    const reusable = preferences.sessionReuse ? sessionAnalysisReuse.get(reuseKey) : undefined
+    if (reusable && reusable.expiresAt > Date.now()) {
+      const evidenceId = randomUUID()
+      const expiresAtMs = Date.now() + 30 * 60_000
+      analysisEvidence.set(evidenceId, {
+        routePath: reusable.evidence.routePath,
+        apis: new Map(reusable.evidence.apis),
+        expiresAt: expiresAtMs
+      })
+      return {
+        ...reusable.result,
+        evidenceId,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+        analysisReuse: {
+          enabled: true,
+          reused: true,
+          scope: 'same-session-exact-input',
+          originalAnalyzedAt: reusable.analyzedAt,
+          sourceRevalidated: true
+        }
+      }
+    }
+    if (reusable) sessionAnalysisReuse.delete(reuseKey)
     const routeCandidates = codeRoutes
       .map(route => ({ ...route, score: route.path === routePath ? 100 : route.path.includes(routePath) || routePath.includes(route.path) ? 40 : 0 }))
       .filter(route => route.score > 0)
@@ -566,7 +606,6 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         }
       }
     } catch {}
-    const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
     for (const apiUrl of explicitApis) {
       if (typeof apiUrl !== 'string') continue
       if (!apiMap.has(apiUrl)) throw new Error([
@@ -576,7 +615,6 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       ].join(' '))
       apiMap.get(apiUrl).score += 160
     }
-    const preferences = await readAnalysisPreferences()
     const acceleration = {
       mode: preferences.mode,
       usedCache: false,
@@ -741,15 +779,23 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       }
     }
     const evidenceId = randomUUID()
-    const result = { evidenceId, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), query: input.query || '',
+    const analyzedAt = new Date().toISOString()
+    const expiresAtMs = Date.now() + 30 * 60_000
+    const result = { evidenceId, expiresAt: new Date(expiresAtMs).toISOString(), query: input.query || '',
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
       routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })),
       apis, analysisPlan,
-      acceleration
+      acceleration,
+      analysisReuse: { enabled: preferences.sessionReuse, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
     }
-    analysisEvidence.set(evidenceId, { routePath: route.path,
+    const evidenceRecord = { routePath: route.path,
       apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
-      expiresAt: Date.now() + 30 * 60_000 })
+      expiresAt: expiresAtMs }
+    analysisEvidence.set(evidenceId, evidenceRecord)
+    if (preferences.sessionReuse) {
+      sessionAnalysisReuse.set(reuseKey, { result, evidence: evidenceRecord, expiresAt: Date.now() + 5 * 60_000, analyzedAt })
+      while (sessionAnalysisReuse.size > 50) sessionAnalysisReuse.delete(sessionAnalysisReuse.keys().next().value)
+    }
     if (preferences.mode === 'assisted' && acceleration.cacheKey) {
       const cache = await readAnalysisCache()
       cache.entries[acceleration.cacheKey] = {
@@ -943,11 +989,16 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) return respond(res, 413, { error: 'Request too large' }) }
           const input = JSON.parse(body)
           if (!['strict', 'assisted'].includes(input.mode)) return respond(res, 422, { error: 'mode must be strict or assisted' })
-          await atomicJson(analysisPreferenceFile, { schemaVersion: 1, mode: input.mode, updatedAt: new Date().toISOString() })
+          if (input.sessionReuse !== undefined && typeof input.sessionReuse !== 'boolean') return respond(res, 422, { error: 'sessionReuse must be boolean when provided' })
+          const current = await readAnalysisPreferences()
+          await atomicJson(analysisPreferenceFile, { schemaVersion: 1, mode: input.mode,
+            sessionReuse: input.sessionReuse ?? current.sessionReuse, updatedAt: new Date().toISOString() })
+          invalidateSessionAnalysisReuse()
           return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: Object.keys((await readAnalysisCache()).entries).length })
         }
         if (url.pathname === '/__desktop/analysis-cache/clear' && req.method === 'POST') {
           await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: {} })
+          invalidateSessionAnalysisReuse()
           return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: 0 })
         }
         if (url.pathname === '/__desktop/user-data/status') return respond(res, 200, { ...userDataStatus, projectId: manifest.projectId, buildId: manifest.buildId,
@@ -1002,6 +1053,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             if (invalid.length) throw new Error(`Imported Profiles have invalid bindings: ${invalid.map(item => item.id).join(', ')}`)
             const rollbackFile = join(userRoot, '.rollbacks', `${operationId}.json`)
             await atomicJson(rollbackFile, rollback)
+            invalidateSessionAnalysisReuse()
             return respond(res, 201, { operationId, importedProfiles: [...importedIds], status: userDataStatus })
           } catch (error) {
             await restoreRollback(rollback)
@@ -1153,6 +1205,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             creationRecords.set(input.profile.id, { createdAt: new Date().toISOString(), evidenceId: input.evidenceId,
               routePath: analysis.routePath, apis: input.scenarios.map(item => ({ apiUrl: item.apiUrl, scenarioId: item.id,
                 evidence: analysis.apis.get(item.apiUrl)?.typeEvidence || null })) })
+            invalidateSessionAnalysisReuse()
             return respond(res, 201, { operationId, profileId: input.profile.id, scenarioCount: input.scenarios.length, rollbackFile,
               validation: { ok: true, apiBindings: summary.apis.map(api => ({ apiUrl: api.apiUrl, scenarioId: api.scenarioId })), requests: requestValidation } })
           } catch (error) {
@@ -1169,6 +1222,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const rollback = JSON.parse(await readFile(rollbackFile, 'utf8'))
           await restoreRollback(rollback)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+          invalidateSessionAnalysisReuse()
           const availableProfileIds = new Set((await catalog()).map(profile => profile.id))
           const resetSessionIds = []
           for (const [storedSessionId, storedState] of sessionStates) {

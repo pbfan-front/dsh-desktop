@@ -81,6 +81,7 @@ try {
   assert.equal((await missingTargetResponse.json()).code, 'E_TARGET_ROUTE_REQUIRED')
   const defaultAnalysisMode = await (await get('/__desktop/analysis-mode', { headers })).json()
   assert.equal(defaultAnalysisMode.mode, 'strict')
+  assert.equal(defaultAnalysisMode.sessionReuse, true)
   assert.equal(defaultAnalysisMode.cacheEntries, 0)
   const assistedModeResponse = await get('/__desktop/analysis-mode/set', {
     method: 'POST', headers, body: JSON.stringify({ mode: 'assisted' })
@@ -118,6 +119,19 @@ try {
   assert.equal(receiptAnalysis.analysisPlan.repositorySearch, 'only-if-focus-candidates-are-insufficient')
   assert.equal(receiptAnalysis.acceleration.mode, 'assisted')
   assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
+  assert.equal(receiptAnalysis.analysisReuse.reused, false)
+  const reusedReceiptAnalysis = await (await get('/__desktop/analyze-target', {
+    method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })).json()
+  assert.equal(reusedReceiptAnalysis.analysisReuse.reused, true, JSON.stringify(reusedReceiptAnalysis.analysisReuse))
+  assert.equal(reusedReceiptAnalysis.analysisReuse.scope, 'same-session-exact-input')
+  assert.notEqual(reusedReceiptAnalysis.evidenceId, receiptAnalysis.evidenceId)
+  assert.deepEqual(reusedReceiptAnalysis.analysisPlan, receiptAnalysis.analysisPlan)
+  const otherSessionReceiptAnalysis = await (await get('/__desktop/analyze-target', {
+    method: 'POST', headers: { ...headers, 'X-DSH-Session': 'analysis-other-session' },
+    body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })).json()
+  assert.equal(otherSessionReceiptAnalysis.analysisReuse.reused, false)
   const receiveAccountAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
     routePath: '/loan/receiveAcct', query: '收款账户 校验失败'
   }) })
@@ -163,6 +177,11 @@ try {
   const clearAnalysisCacheResponse = await get('/__desktop/analysis-cache/clear', { method: 'POST', headers, body: '{}' })
   assert.equal(clearAnalysisCacheResponse.status, 200)
   assert.equal((await clearAnalysisCacheResponse.json()).cacheEntries, 0)
+  const disableSessionReuseResponse = await get('/__desktop/analysis-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'strict', sessionReuse: false })
+  })
+  assert.equal(disableSessionReuseResponse.status, 200)
+  assert.equal((await disableSessionReuseResponse.json()).sessionReuse, false)
   const unsupportedExplicit = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
     routePath: '/credit/productCombine', query: '不存在的接口', apiUrls: ['/missing/notFound.json']
   }) })
@@ -179,6 +198,18 @@ try {
   assert.equal(firstMockAnalysis.analysisPlan.qualityGate.level, 'ready')
   assert.equal(firstMockAnalysis.analysisPlan.qualityGate.autoDraftAllowed, false)
   assert.equal(firstMockAnalysis.analysisPlan.qualityGate.factors.explicitApiCount, 1)
+  assert.equal(firstMockAnalysis.analysisReuse.enabled, false)
+  assert.equal(firstMockAnalysis.analysisReuse.reused, false)
+  const repeatedWithoutReuse = await (await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
+    routePath: '/face/home', query: 'KYC 刷脸', apiUrls: ['/cloudiii/getKycFaceId.json']
+  }) })).json()
+  assert.equal(repeatedWithoutReuse.analysisReuse.enabled, false)
+  assert.equal(repeatedWithoutReuse.analysisReuse.reused, false)
+  const restoreSessionReuseResponse = await get('/__desktop/analysis-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'strict', sessionReuse: true })
+  })
+  assert.equal(restoreSessionReuseResponse.status, 200)
+  assert.equal((await restoreSessionReuseResponse.json()).sessionReuse, true)
   const missingMockApi = firstMockAnalysis.apis.find(item => item.apiUrl === '/cloudiii/getKycFaceId.json')
   assert.equal(missingMockApi?.mockExists, false, JSON.stringify(missingMockApi))
   assert.equal(missingMockApi?.canGenerate, true, JSON.stringify(missingMockApi))
