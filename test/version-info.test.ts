@@ -65,7 +65,10 @@ describe('desktop version information', () => {
     expect(aboutDetail('0.1.1', '0.1.5', 'zh', {
       channel: 'development',
       platform: 'darwin/arm64',
-      businessBuildId: 'business-build-42'
+      businessBuildId: 'business-build-42',
+      businessPackageVersion: '0.1.0',
+      businessPluginId: 'com.dataelement.demo-test',
+      businessPluginName: '微业贷业务体验'
     })).toContain('业务 Build ID：business-build-42')
   })
 })

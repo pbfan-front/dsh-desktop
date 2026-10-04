@@ -7,6 +7,31 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const { BrandWordmark, FishLogo } = require('@deepseek-ai/dsh-client-ui-primitives')
+    const WORKFLOW_NS = 'dsh-desktop-workflow'
+    const workflowZh = {
+      tab: '工作流', guide: '查看业务场景工作流的进度、证据和失败原因', scenarioWorkflow: '业务场景创建与验证', loading: '正在读取工作流…',
+      empty: '暂无工作流运行记录', emptyHint: '通过对话创建业务场景后，运行进度会显示在这里。',
+      loadFailed: '工作流记录加载失败', retryLoad: '重新加载', updated: '更新于', steps: '执行步骤',
+      route: '业务页面', profile: '体验分支', session: '关联会话', query: '目标', evidence: '证据', error: '失败原因', input: '输入摘要', output: '输出摘要',
+      version: '工作流版本', compatibility: '兼容状态', current: '当前版本', migratable: '可安全迁移', migrated: '已迁移', historical: '历史记录', incompatible: '不兼容',
+      incompatibleHint: '当前业务插件无法安全继续此运行；历史记录仍可查看，请重新创建工作流。', migratableHint: '此运行将在下一次继续或重试时迁移到当前兼容版本。',
+      retry: '重试失败步骤', cancel: '取消运行', copy: '复制诊断', copied: '已复制', actionFailed: '操作失败',
+      waitingHint: '正在等待确认，请回到对话继续该步骤。', runningHint: '工作流正在执行，状态会自动更新。',
+      pending: '待执行', running: '执行中', waiting_for_user: '等待确认', completed: '已完成', failed: '失败',
+      cancelled: '已取消', skipped: '已跳过', deterministic: '确定性', agent: 'Agent', checkpoint: '检查点'
+    }
+    const workflowEn = {
+      tab: 'Workflows', guide: 'Inspect business workflow progress, evidence, and failures', scenarioWorkflow: 'Create and verify business scenario', loading: 'Loading workflows…',
+      empty: 'No workflow runs yet', emptyHint: 'Runs created through business conversations will appear here.',
+      loadFailed: 'Unable to load workflow runs', retryLoad: 'Reload', updated: 'Updated', steps: 'Steps',
+      route: 'Route', profile: 'Profile', session: 'Conversation', query: 'Target', evidence: 'Evidence', error: 'Failure', input: 'Input summary', output: 'Output summary',
+      version: 'Workflow version', compatibility: 'Compatibility', current: 'Current', migratable: 'Safe to migrate', migrated: 'Migrated', historical: 'Historical', incompatible: 'Incompatible',
+      incompatibleHint: 'The current business plugin cannot safely continue this run. History remains available; create a new workflow.', migratableHint: 'This run will migrate to the current compatible version when resumed or retried.',
+      retry: 'Retry failed step', cancel: 'Cancel run', copy: 'Copy diagnostics', copied: 'Copied', actionFailed: 'Action failed',
+      waitingHint: 'Waiting for confirmation. Continue this step in the conversation.', runningHint: 'The workflow is running and will update automatically.',
+      pending: 'Pending', running: 'Running', waiting_for_user: 'Waiting', completed: 'Completed', failed: 'Failed',
+      cancelled: 'Cancelled', skipped: 'Skipped', deterministic: 'Deterministic', agent: 'Agent', checkpoint: 'Checkpoint'
+    }
 
     // Tight bounds of the mark inside its 1000x1000 source artwork.
     const BRAND_MARK_VIEWBOX = { x: 42, y: 218, width: 898, height: 564 }
@@ -230,25 +255,171 @@ window.__ModuleLoader__.load({
         state.runtimeState === 'failed' && React.createElement('div', {
           style: { position: 'absolute', zIndex: 3, inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(248,250,252,.96)' }
         }, failurePanel),
-        state.codeIntell && React.createElement('div', {
-          title: state.codeIntell.error || `索引生成于 ${state.codeIntell.generatedAt || '未知时间'}`,
-          style: { position: 'absolute', zIndex: 2, right: 12, top: 10, padding: '4px 8px', borderRadius: 12,
-            fontSize: 11, lineHeight: '16px', background: state.codeIntell.state === 'ready' ? '#e8f7ee' : '#fff0ed',
-            color: state.codeIntell.state === 'ready' ? '#08783e' : '#b42318', boxShadow: '0 1px 4px rgba(0,0,0,.12)' }
-        }, state.codeIntell.state === 'ready'
-          ? `索引正常 · ${state.codeIntell.coverage?.routes || 0} 路由`
-          : '索引异常 · 场景分析已降级'),
         React.createElement('div', { ref: setFrameContainer,
           'data-dsh-business-preview-container': true,
           style: { width: '100%', height: '100%', minHeight: 0 } })
       )
     }
 
+    function workflowHostWindow() {
+      try { if (window.top?.document) return window.top } catch {}
+      return window
+    }
+
+    function workflowBridge() {
+      return workflowHostWindow().dshDesktop || window.dshDesktop
+    }
+
+    async function loadWorkflowRuns() {
+      const bridge = workflowBridge()
+      if (!bridge?.businessWorkflowRuns) throw new Error('Workflow bridge is unavailable.')
+      return bridge.businessWorkflowRuns()
+    }
+
+    function installWorkflowStyles() {
+      if (document.getElementById('dsh-desktop-workflow-styles')) return
+      const style = document.createElement('style')
+      style.id = 'dsh-desktop-workflow-styles'
+      style.textContent = `
+        .dshWorkflowPanel{box-sizing:border-box;height:100%;overflow:auto;padding:16px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1)}
+        .dshWorkflowLayout{display:grid;grid-template-columns:minmax(220px,34%) minmax(0,1fr);gap:12px;min-height:100%}
+        .dshWorkflowList,.dshWorkflowDetail{min-width:0;border:1px solid var(--dsw-alias-border-l3);border-radius:12px;background:var(--dsw-alias-bg-layer-2)}
+        .dshWorkflowList{padding:8px;align-self:start}.dshWorkflowListButton{display:block;width:100%;padding:11px;border:0;border-radius:9px;background:transparent;color:inherit;text-align:left;cursor:pointer}
+        .dshWorkflowListButton:hover,.dshWorkflowListButton[aria-current=true]{background:var(--dsw-alias-bg-layer-3,var(--dsw-alias-bg-module-platform))}
+        .dshWorkflowRow{display:flex;align-items:center;justify-content:space-between;gap:8px}.dshWorkflowTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
+        .dshWorkflowMeta,.dshWorkflowSecondary{color:var(--dsw-alias-label-secondary);font-size:11px}.dshWorkflowMeta{margin-top:5px}
+        .dshWorkflowBadge{flex:none;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;padding:2px 7px;font-size:10px}.dshWorkflowBadge[data-status=failed]{color:var(--dsw-alias-state-error-primary)}
+        .dshWorkflowDetail{padding:16px}.dshWorkflowHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.dshWorkflowHeader h3{margin:0;font-size:16px}.dshWorkflowFacts{display:flex;flex-wrap:wrap;gap:8px 16px;margin:14px 0;font-size:12px}
+        .dshWorkflowFact strong{display:block;margin-bottom:3px;font-size:10px;color:var(--dsw-alias-label-tertiary);font-weight:500}.dshWorkflowNotice{margin:12px 0;padding:10px;border-radius:8px;background:var(--dsw-alias-bg-layer-3,var(--dsw-alias-bg-module-platform));font-size:12px}
+        .dshWorkflowSteps{display:grid;gap:8px}.dshWorkflowStep{padding:10px;border:1px solid var(--dsw-alias-border-l3);border-radius:9px}.dshWorkflowStepError{margin-top:7px;color:var(--dsw-alias-state-error-primary);font-size:11px;white-space:pre-wrap}.dshWorkflowEvidence{margin-top:7px;color:var(--dsw-alias-label-secondary);font-size:11px;word-break:break-all}
+        .dshWorkflowSummary{margin-top:7px;color:var(--dsw-alias-label-secondary);font-size:11px;white-space:pre-wrap;word-break:break-word}.dshWorkflowSummary strong{color:var(--dsw-alias-label-tertiary);font-weight:500}
+        .dshWorkflowActions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}.dshWorkflowButton{height:32px;padding:0 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:inherit;cursor:pointer}.dshWorkflowButton:disabled{opacity:.45;cursor:not-allowed}.dshWorkflowButtonPrimary{border-color:transparent;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground)}
+        .dshWorkflowState{display:flex;min-height:180px;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary)}
+        @media(max-width:760px){.dshWorkflowLayout{grid-template-columns:1fr}.dshWorkflowList{max-height:220px;overflow:auto}}
+      `
+      document.head.appendChild(style)
+    }
+
+    function workflowContextFact(context, key) {
+      const value = context && context[key]
+      return typeof value === 'string' && value ? value : ''
+    }
+
+    function workflowProfileId(run) {
+      return workflowContextFact(run.context, 'profileId') || workflowContextFact(run.context?.plan, 'profileId')
+    }
+
+    function workflowValueSummary(value) {
+      if (value === undefined) return ''
+      try {
+        const serialized = JSON.stringify(value)
+        return serialized.length > 320 ? `${serialized.slice(0, 317)}…` : serialized
+      } catch { return String(value).slice(0, 320) }
+    }
+
+    function workflowTitle(run, t) {
+      return run.workflowId === 'business-scenario-create' ? t('scenarioWorkflow') : run.workflowId
+    }
+
+    function WorkflowPanel({ t }) {
+      const [state, setState] = React.useState({ runs: [], selectedId: '', loading: true, error: '', busy: '', copied: false })
+      const refresh = React.useCallback(async () => {
+        try {
+          const value = await loadWorkflowRuns()
+          const runs = [...(value?.runs || [])].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+          setState(previous => ({ ...previous, runs, selectedId: runs.some(run => run.id === previous.selectedId) ? previous.selectedId : runs[0]?.id || '', loading: false, error: '' }))
+        } catch (error) {
+          setState(previous => ({ ...previous, loading: false, error: String(error) }))
+        }
+      }, [])
+      React.useEffect(() => {
+        let active = true
+        void refresh()
+        const unsubscribe = workflowBridge()?.onBusinessWorkflowChanged?.(run => {
+          if (!active) return
+          setState(previous => {
+            const runs = [run, ...previous.runs.filter(item => item.id !== run.id)].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+            return { ...previous, runs, selectedId: previous.selectedId || run.id, loading: false, error: '' }
+          })
+        })
+        return () => { active = false; unsubscribe?.() }
+      }, [refresh])
+      const selected = state.runs.find(run => run.id === state.selectedId) || state.runs[0]
+      const action = async (kind) => {
+        if (!selected || state.busy) return
+        setState(previous => ({ ...previous, busy: kind, error: '' }))
+        try {
+          const bridge = workflowBridge()
+          const result = kind === 'retry'
+            ? await bridge.retryBusinessWorkflow(selected.id)
+            : await bridge.cancelBusinessWorkflow(selected.id)
+          setState(previous => ({ ...previous, runs: [result.run, ...previous.runs.filter(item => item.id !== result.run.id)], busy: '' }))
+        } catch (error) {
+          setState(previous => ({ ...previous, busy: '', error: `${t('actionFailed')}: ${String(error)}` }))
+        }
+      }
+      const copyDiagnostics = async () => {
+        if (!selected) return
+        try {
+          await navigator.clipboard.writeText(JSON.stringify(selected, null, 2))
+          setState(previous => ({ ...previous, copied: true, error: '' }))
+          window.setTimeout(() => setState(previous => ({ ...previous, copied: false })), 1500)
+        } catch (error) {
+          setState(previous => ({ ...previous, error: `${t('actionFailed')}: ${String(error)}` }))
+        }
+      }
+      if (state.loading) return React.createElement('div', { className: 'dshWorkflowPanel dshWorkflowState', 'aria-live': 'polite' }, t('loading'))
+      if (state.error && !state.runs.length) return React.createElement('div', { className: 'dshWorkflowPanel dshWorkflowState' }, React.createElement('div', null,
+        React.createElement('p', null, t('loadFailed')), React.createElement('button', { className: 'dshWorkflowButton', onClick: refresh }, t('retryLoad'))))
+      if (!selected) return React.createElement('div', { className: 'dshWorkflowPanel dshWorkflowState' }, React.createElement('div', null,
+        React.createElement('strong', null, t('empty')), React.createElement('p', { className: 'dshWorkflowSecondary' }, t('emptyHint'))))
+      const failedStep = selected.steps.find(step => step.id === selected.currentStepId && step.status === 'failed')
+      return React.createElement('div', { className: 'dshWorkflowPanel' }, React.createElement('div', { className: 'dshWorkflowLayout' },
+        React.createElement('div', { className: 'dshWorkflowList', role: 'list' }, state.runs.map(run => React.createElement('button', {
+          key: run.id, type: 'button', role: 'listitem', className: 'dshWorkflowListButton', 'aria-current': run.id === selected.id,
+          onClick: () => setState(previous => ({ ...previous, selectedId: run.id }))
+        }, React.createElement('div', { className: 'dshWorkflowRow' }, React.createElement('span', { className: 'dshWorkflowTitle' }, workflowTitle(run, t)),
+          React.createElement('span', { className: 'dshWorkflowBadge', 'data-status': run.status }, t(run.status))),
+          React.createElement('div', { className: 'dshWorkflowMeta' }, new Date(run.updatedAt).toLocaleString())))),
+        React.createElement('section', { className: 'dshWorkflowDetail', 'aria-live': 'polite' },
+          React.createElement('div', { className: 'dshWorkflowHeader' }, React.createElement('div', null,
+            React.createElement('h3', null, workflowTitle(selected, t)), React.createElement('div', { className: 'dshWorkflowMeta' }, `${t('updated')} ${new Date(selected.updatedAt).toLocaleString()}`)),
+            React.createElement('span', { className: 'dshWorkflowBadge', 'data-status': selected.status }, t(selected.status))),
+          React.createElement('div', { className: 'dshWorkflowFacts' },
+            React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('version')), `${selected.workflowVersion}${selected.compatibility?.currentVersion && selected.compatibility.currentVersion !== selected.workflowVersion ? ` → ${selected.compatibility.currentVersion}` : ''}`),
+            selected.compatibility?.status && React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('compatibility')), t(selected.compatibility.status)),
+            workflowContextFact(selected.context, 'routePath') && React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('route')), workflowContextFact(selected.context, 'routePath')),
+            workflowProfileId(selected) && React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('profile')), workflowProfileId(selected)),
+            workflowContextFact(selected.context, 'sessionId') && React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('session')), workflowContextFact(selected.context, 'sessionId')),
+            workflowContextFact(selected.context, 'query') && React.createElement('div', { className: 'dshWorkflowFact' }, React.createElement('strong', null, t('query')), workflowContextFact(selected.context, 'query'))),
+          selected.status === 'waiting_for_user' && React.createElement('div', { className: 'dshWorkflowNotice' }, t('waitingHint')),
+          selected.status === 'running' && React.createElement('div', { className: 'dshWorkflowNotice' }, t('runningHint')),
+          selected.compatibility?.status === 'incompatible' && React.createElement('div', { className: 'dshWorkflowStepError' }, selected.compatibility.reason || t('incompatibleHint')),
+          selected.compatibility?.status === 'migratable' && React.createElement('div', { className: 'dshWorkflowNotice' }, t('migratableHint')),
+          state.error && React.createElement('div', { className: 'dshWorkflowStepError' }, state.error),
+          React.createElement('h4', null, t('steps')),
+          React.createElement('div', { className: 'dshWorkflowSteps' }, selected.steps.map(step => React.createElement('div', { className: 'dshWorkflowStep', key: step.id },
+            React.createElement('div', { className: 'dshWorkflowRow' }, React.createElement('span', { className: 'dshWorkflowTitle' }, step.title),
+              React.createElement('span', { className: 'dshWorkflowBadge', 'data-status': step.status }, `${t(step.type)} · ${t(step.status)}`)),
+            step.startedAt && React.createElement('div', { className: 'dshWorkflowMeta' }, `${new Date(step.startedAt).toLocaleString()}${step.completedAt ? ` – ${new Date(step.completedAt).toLocaleString()}` : ''}`),
+            workflowValueSummary(step.input) && React.createElement('div', { className: 'dshWorkflowSummary' }, React.createElement('strong', null, `${t('input')}: `), workflowValueSummary(step.input)),
+            workflowValueSummary(step.output) && React.createElement('div', { className: 'dshWorkflowSummary' }, React.createElement('strong', null, `${t('output')}: `), workflowValueSummary(step.output)),
+            step.error && React.createElement('div', { className: 'dshWorkflowStepError' }, `${t('error')}: ${step.error.code} · ${step.error.message}`),
+            step.evidenceIds?.length > 0 && React.createElement('div', { className: 'dshWorkflowEvidence' }, `${t('evidence')}: ${step.evidenceIds.join(', ')}`)))),
+          React.createElement('div', { className: 'dshWorkflowActions' },
+            failedStep?.error?.retryable && selected.compatibility?.status !== 'incompatible' && React.createElement('button', { className: 'dshWorkflowButton dshWorkflowButtonPrimary', disabled: Boolean(state.busy), onClick: () => action('retry') }, t('retry')),
+            !['completed', 'cancelled'].includes(selected.status) && selected.status !== 'running' && React.createElement('button', { className: 'dshWorkflowButton', disabled: Boolean(state.busy), onClick: () => action('cancel') }, t('cancel')),
+            React.createElement('button', { className: 'dshWorkflowButton', disabled: Boolean(state.busy), onClick: copyDiagnostics }, state.copied ? t('copied') : t('copy'))))))
+    }
+
     let ctxForBusiness
 
-    const inject = ['slots', 'sidebarRight', 'sidebarRightTabs']
+    const inject = ['slots', 'sidebarRight', 'sidebarRightTabs', 'locale']
     function apply(ctx) {
       ctxForBusiness = ctx
+      installWorkflowStyles()
+      ctx.effect(() => ctx.locale.register(WORKFLOW_NS, { zh: workflowZh, en: workflowEn }), 'dsh-desktop: workflow locale')
+      const workflowT = ctx.locale.bind(WORKFLOW_NS)
       ctx.effect(() => ctx.sidebarRightTabs.register({
         id: 'dsh-desktop-business-preview', kind: 'business-preview',
         title: () => '业务体验',
@@ -258,6 +429,15 @@ window.__ModuleLoader__.load({
         { name: 'sidebar.right.pane.tab', key: 'dsh-desktop-business-preview' },
         BusinessPreviewPanel
       )), 'dsh-desktop: business preview body')
+      ctx.effect(() => ctx.sidebarRightTabs.register({
+        id: 'dsh-desktop-business-workflows', kind: 'business-workflows',
+        title: () => workflowT('tab'),
+        guide: [{ order: 21, title: () => workflowT('tab'), description: () => workflowT('guide') }]
+      }), 'dsh-desktop: business workflows tab')
+      ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
+        { name: 'sidebar.right.pane.tab', key: 'dsh-desktop-business-workflows', inject: () => ({ t: workflowT }) },
+        WorkflowPanel
+      )), 'dsh-desktop: business workflows body')
       ctx.slots.inject('sidebar.brand.mark', () => {
         return ctx.slots.inject('sidebar.brand.name', () => {
           return ctx.slots.inject('conversation.hero.brand.mark', () => {

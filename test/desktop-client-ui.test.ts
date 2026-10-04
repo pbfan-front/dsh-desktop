@@ -39,6 +39,15 @@ describe('DSH Desktop client slot occupants', () => {
     expect(client).toContain('restartBusinessPreview?.()')
     expect(client).toContain("failureKind: 'page-load-failed'")
     expect(client).toContain('showHarnessLog?.()')
+    expect(client).toContain("id: 'dsh-desktop-business-workflows'")
+    expect(client).toContain('businessWorkflowRuns()')
+    expect(client).toContain('onBusinessWorkflowChanged?.(run =>')
+    expect(client).toContain('retryBusinessWorkflow(selected.id)')
+    expect(client).toContain('cancelBusinessWorkflow(selected.id)')
+    expect(client).toContain('navigator.clipboard.writeText(JSON.stringify(selected, null, 2))')
+    expect(client).toContain("selected.compatibility?.status === 'incompatible'")
+    expect(client).toContain("selected.compatibility?.status !== 'incompatible'")
+    expect(client).toContain("ctx.locale.register(WORKFLOW_NS, { zh: workflowZh, en: workflowEn })")
   })
 
   it('registers one occupant per brand seat and keeps the official name mark-free', async () => {
@@ -114,6 +123,10 @@ describe('DSH Desktop client slot occupants', () => {
     }
     const tabDefinitions: Array<{ id: string; kind: string }> = []
     const sidebarRight = { openTab: vi.fn() }
+    const locale = {
+      register: vi.fn(() => () => undefined),
+      bind: vi.fn(() => (key: string) => key)
+    }
     const sidebarRightTabs = {
       register: (definition: { id: string; kind: string }) => {
         tabDefinitions.push(definition)
@@ -124,23 +137,27 @@ describe('DSH Desktop client slot occupants', () => {
       slots,
       sidebarRight,
       sidebarRightTabs,
+      locale,
       effect: (effect: () => unknown) => effect()
     })
 
-    expect(plugin.inject).toEqual(['slots', 'sidebarRight', 'sidebarRightTabs'])
+    expect(plugin.inject).toEqual(['slots', 'sidebarRight', 'sidebarRightTabs', 'locale'])
     expect(registrations.map(({ config }) => config.name)).toEqual([
+      'sidebar.right.pane.tab',
       'sidebar.right.pane.tab',
       'sidebar.brand.mark',
       'sidebar.brand.name',
       'conversation.hero.brand.mark',
       'conversation.session.header.actions'
     ])
-    expect(tabDefinitions).toHaveLength(1)
+    expect(tabDefinitions).toHaveLength(2)
     expect(tabDefinitions[0]).toMatchObject({ id: 'dsh-desktop-business-preview', kind: 'business-preview' })
+    expect(tabDefinitions[1]).toMatchObject({ id: 'dsh-desktop-business-workflows', kind: 'business-workflows' })
+    expect(locale.register).toHaveBeenCalledOnce()
     expect(registrations.find(({ config }) => config.id === 'business-preview')).toBeUndefined()
     expect(registrations.find(({ config }) => config.id === 'business-sidebar-preview')?.config.order).toBe(81)
-    // The mark is drawn in currentColor, so no theme stylesheet is injected.
-    expect(appended).toHaveLength(0)
+    // The mark is drawn in currentColor; the only stylesheet belongs to the workflow panel.
+    expect(appended).toHaveLength(1)
 
     const sidebarName = registrations.find(
       ({ config }) => config.name === 'sidebar.brand.name'

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { cp, mkdir, readFile, readdir, writeFile, stat } from 'node:fs/promises'
 import { resolve, join, dirname } from 'node:path'
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import { createCodeIntellLifecycle } from './code-intell-lifecycle.mjs'
 
 // Build outputs are inputs, never generated from an arbitrary npm script here.
@@ -11,6 +12,7 @@ if (!projectArg || !destinationArg || !webArg) throw new Error('Usage: node scri
 const project = resolve(projectArg)
 const destination = resolve(destinationArg)
 const web = resolve(webArg)
+const pluginConfig = (await import(pathToFileURL(join(project, 'dsh-business-plugin.config.mjs')).href)).default
 const runtime = join(project, 'mock-platform/.next/standalone')
 await stat(join(runtime, 'server.js'))
 const platformSourceFile = join(project, 'mock-platform/app/page.tsx')
@@ -79,11 +81,15 @@ const collectIntegrity = async (directory, prefix = '') => {
 await collectIntegrity(destination)
 const packageVersion = process.env.DSH_BUSINESS_PACKAGE_VERSION || `0.1.0-dev.${Date.now()}`
 await writeFile(join(destination, 'manifest.json'), JSON.stringify({
-  schemaVersion: 2, packageVersion,
-  compatibility: { desktop: { min: '0.1.0', maxExclusive: '0.2.0' } },
-  projectId: 'demo-test', buildId, businessCommit: commit, workingTree: dirty, testProfiles: Boolean(profilesArg),
+  type: 'dsh-business-plugin', schemaVersion: 2,
+  pluginId: pluginConfig.pluginId, projectId: pluginConfig.projectId, displayName: pluginConfig.displayName,
+  capabilities: pluginConfig.capabilities,
+  workflows: pluginConfig.workflows || [],
+  packageVersion,
+  compatibility: pluginConfig.compatibility,
+  buildId, businessCommit: commit, workingTree: dirty, testProfiles: Boolean(profilesArg),
   validation: 'P0 development snapshot; index and web provenance require release-pipeline verification',
-  businessPath, entryRoute: '/credit/productCombine', sourceRoot: 'source', webRoot: 'web', platformRoot: 'platform',
+  businessPath, entryRoute: pluginConfig.entryRoute, sourceRoot: 'source', webRoot: 'web', platformRoot: 'platform',
   provenance, sourceHashes: hashes, integrity: { algorithm: 'sha256', files: integrityFiles }
 }, null, 2))
 console.log(JSON.stringify({ destination, buildId, packageVersion, businessPath, platformBuildId, sourceFiles: Object.keys(hashes).length, integrityFiles: Object.keys(integrityFiles).length }))

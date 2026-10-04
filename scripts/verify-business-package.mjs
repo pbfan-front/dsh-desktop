@@ -12,6 +12,14 @@ const sha256 = async file => createHash('sha256').update(await readFile(file)).d
 const check = (condition, message) => { if (!condition) failures.push(message) }
 
 check(manifest.schemaVersion === 2, 'manifest schemaVersion must be 2')
+check(manifest.type === 'dsh-business-plugin', 'manifest type must be dsh-business-plugin')
+check(Boolean(manifest.pluginId), 'manifest pluginId is missing')
+check(Boolean(manifest.displayName), 'manifest displayName is missing')
+check(Array.isArray(manifest.capabilities) && manifest.capabilities.includes('business-preview'), 'manifest business-preview capability is missing')
+check(Array.isArray(manifest.workflows), 'manifest workflows declaration is missing')
+check(manifest.workflows.some(workflow => workflow?.id === 'business-scenario-create'), 'manifest business-scenario-create workflow is missing')
+const scenarioWorkflow = manifest.workflows.find(workflow => workflow?.id === 'business-scenario-create')
+check(scenarioWorkflow?.steps?.some(step => step?.id === 'verify-preview' && step?.gate === 'business.preview-verification'), 'manifest preview verification gate is missing')
 check(Boolean(manifest.buildId), 'manifest buildId is missing')
 check(Boolean(manifest.packageVersion), 'manifest packageVersion is missing')
 check(Boolean(manifest.compatibility?.desktop?.min), 'manifest Desktop minimum version is missing')

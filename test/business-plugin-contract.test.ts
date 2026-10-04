@@ -1,0 +1,43 @@
+import { describe, expect, it } from 'vitest'
+import { parseBusinessPluginWorkflows } from '../src/main/business-plugin-contract'
+
+const workflow = {
+  id: 'business-scenario-create',
+  version: '1.0.0',
+  title: '创建并验证业务体验场景',
+  inputSchema: { type: 'object', required: ['routePath'] },
+  steps: [
+    { id: 'analyze-target', type: 'deterministic', title: '分析', handler: 'business.analyze-target' },
+    { id: 'confirm-plan', type: 'checkpoint', title: '确认' }
+  ]
+}
+
+describe('business plugin workflow declarations', () => {
+  it('accepts declarative schemas with allowlisted handlers', () => {
+    expect(parseBusinessPluginWorkflows({ workflows: [workflow] })).toEqual([workflow])
+  })
+
+  it('rejects arbitrary executable handler names', () => {
+    expect(() => parseBusinessPluginWorkflows({
+      workflows: [{ ...workflow, steps: [{ id: 'run-shell', type: 'deterministic', title: '执行', handler: 'shell.exec' }] }]
+    })).toThrow('unsupported handler')
+  })
+
+  it('rejects handlers on user checkpoints', () => {
+    expect(() => parseBusinessPluginWorkflows({
+      workflows: [{ ...workflow, steps: [{ id: 'confirm', type: 'checkpoint', title: '确认', handler: 'business.apply-profile' }] }]
+    })).toThrow('cannot declare a handler')
+  })
+
+  it('accepts the preview evidence gate and rejects unknown gates', () => {
+    const verifyStep = { id: 'verify-preview', type: 'deterministic', title: '验证', handler: 'business.verify-preview', gate: 'business.preview-verification' }
+    expect(parseBusinessPluginWorkflows({ workflows: [{ ...workflow, steps: [verifyStep] }] })[0]?.steps[0]?.gate).toBe('business.preview-verification')
+    expect(() => parseBusinessPluginWorkflows({ workflows: [{ ...workflow, steps: [{ ...verifyStep, gate: 'plugin.run-anything' }] }] })).toThrow('unsupported gate')
+  })
+
+  it('validates explicitly compatible persisted run versions', () => {
+    const parsed = parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['0.9.0'] }] })
+    expect(parsed[0]?.compatibleRunVersions).toEqual(['0.9.0'])
+    expect(() => parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['1.0.0'] }] })).toThrow('must not repeat')
+  })
+})

@@ -12,18 +12,31 @@ export type BusinessPreviewState = {
   error?: string
 }
 
+export type BusinessControlPath =
+  | '/__desktop/analyze-target'
+  | '/__desktop/create-profile'
+  | '/__desktop/apply'
+  | '/__desktop/verify'
+
+export type BusinessWorkflowCommand = {
+  action: 'start-scenario' | 'resume' | 'retry' | 'cancel' | 'list' | 'get'
+  payload?: unknown
+}
+
 export class BusinessPreview {
   private child?: ChildProcess
   private window?: BrowserWindow
   private starting?: Promise<string>
   private origin?: string
+  private token?: string
+  private workflowToken?: string
   private desiredRunning = false
   private stopping = false
   private recoveryTimer?: NodeJS.Timeout
   private stableTimer?: NodeJS.Timeout
   private recoveryAttempts: number[] = []
   private state: BusinessPreviewState = { phase: 'stopped', attempt: 0 }
-  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; developmentAppUrl?: string; log: (text: string) => void; onStateChange?: (state: BusinessPreviewState) => void }) {}
+  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; developmentAppUrl?: string; log: (text: string) => void; onStateChange?: (state: BusinessPreviewState) => void; onWorkflowCommand?: (command: BusinessWorkflowCommand) => Promise<unknown> }) {}
 
   snapshot(): BusinessPreviewState {
     return { ...this.state }
@@ -67,6 +80,7 @@ export class BusinessPreview {
 
   private async launch(): Promise<string> {
     const token = randomBytes(32).toString('hex')
+    const workflowToken = randomBytes(32).toString('hex')
     let handshakeComplete = false
     let outputTail = ''
     const capture = (data: unknown): void => {
@@ -87,6 +101,7 @@ export class BusinessPreview {
       env: {
         ...childEnv,
         DSH_BUSINESS_TOKEN: token,
+        DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken,
         DSH_BUSINESS_SOURCE_ROOT: this.options.sourceRoot,
         DSH_BUSINESS_USER_ROOT: this.options.userRoot
       }
@@ -98,7 +113,7 @@ export class BusinessPreview {
       if (this.child === child) {
         if (this.stableTimer) clearTimeout(this.stableTimer)
         this.stableTimer = undefined
-        this.child = undefined; this.origin = undefined
+        this.child = undefined; this.origin = undefined; this.token = undefined
         void rm(this.options.connectionFile, { force: true })
         const kind = handshakeComplete ? 'service-exited' : 'package-incompatible'
         this.scheduleRecovery(`业务服务已退出（code=${code ?? 'null'}, signal=${signal ?? 'none'}）`, kind)
@@ -115,8 +130,11 @@ export class BusinessPreview {
           await writeFile(this.options.connectionFile, JSON.stringify({ ...message, token }), { mode: 0o600 })
           handshakeComplete = true
           this.origin = message.origin
+          this.token = token
+          this.workflowToken = workflowToken
           child.on('message', (nextMessage: any) => {
             if (nextMessage?.type === 'show-preview') void this.show().catch(error => this.options.log(`Unable to show business preview: ${error}`))
+            if (nextMessage?.type === 'workflow-request') void this.handleWorkflowRequest(child, nextMessage)
           })
           clearTimeout(timer)
           if (this.stableTimer) clearTimeout(this.stableTimer)
@@ -127,6 +145,27 @@ export class BusinessPreview {
         } catch (error) { child.kill(); fail(error as Error) }
       })
     })
+  }
+
+  private async handleWorkflowRequest(child: ChildProcess, message: unknown): Promise<void> {
+    if (!message || typeof message !== 'object') return
+    const request = message as Record<string, unknown>
+    if (typeof request.id !== 'string' || !/^[0-9a-f-]{36}$/.test(request.id)) return
+    const actions = new Set(['start-scenario', 'resume', 'retry', 'cancel', 'list', 'get'])
+    if (typeof request.action !== 'string' || !actions.has(request.action)) return
+    if (!this.options.onWorkflowCommand) {
+      child.send?.({ type: 'workflow-response', id: request.id, ok: false, error: 'Business workflow runtime is unavailable.' })
+      return
+    }
+    try {
+      const result = await this.options.onWorkflowCommand({
+        action: request.action as BusinessWorkflowCommand['action'],
+        payload: request.payload
+      })
+      child.send?.({ type: 'workflow-response', id: request.id, ok: true, result })
+    } catch (error) {
+      child.send?.({ type: 'workflow-response', id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   async show(): Promise<void> {
@@ -155,6 +194,26 @@ export class BusinessPreview {
     return `${origin}/?desktop=1&embedded=1`
   }
 
+  async controlRequest(path: BusinessControlPath, body: unknown, sessionId?: string, workflow = false): Promise<unknown> {
+    const origin = await this.start()
+    if (!this.token) throw new Error('Business control token is unavailable.')
+    const response = await fetch(`${origin}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        'Content-Type': 'application/json',
+        ...(sessionId ? { 'X-DSH-Session': sessionId } : {}),
+        ...(workflow && this.workflowToken ? { 'X-DSH-Workflow-Token': this.workflowToken } : {})
+      },
+      body: JSON.stringify(body)
+    })
+    const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as Record<string, unknown>
+    if (!response.ok) {
+      throw new Error(typeof payload.error === 'string' ? payload.error : `Business control request failed: HTTP ${response.status}`)
+    }
+    return payload
+  }
+
   async restart(): Promise<string> {
     await this.stop(false)
     return await this.start()
@@ -178,6 +237,8 @@ export class BusinessPreview {
     }
     await rm(this.options.connectionFile, { force: true })
     this.origin = undefined
+    this.token = undefined
+    this.workflowToken = undefined
     this.starting = undefined
     this.stopping = false
     this.recoveryAttempts = permanent ? [] : this.recoveryAttempts

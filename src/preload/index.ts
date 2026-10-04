@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AvailableRelease, UpdateStatus } from '../shared/contracts'
+import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
 import { setupDesktopStoragePersistence } from './desktop-storage'
 import {
   isUpdateDismissed,
@@ -40,6 +41,8 @@ interface AboutInfo {
   harnessVersion: string
   businessBuildId: string
   businessPackageVersion: string
+  businessPluginId: string
+  businessPluginName: string
   channel: 'development' | 'production'
   platform: string
   locale: 'en' | 'zh'
@@ -597,6 +600,19 @@ contextBridge.exposeInMainWorld(
     businessPreviewUrl: (): Promise<{ url: string }> => ipcRenderer.invoke('business:preview-url'),
     businessPreviewStatus: (): Promise<{ phase: string; attempt: number; error?: string }> => ipcRenderer.invoke('business:preview-status'),
     restartBusinessPreview: (): Promise<{ ok: boolean; url: string }> => ipcRenderer.invoke('business:restart-preview'),
+    startBusinessScenarioWorkflow: (input: BusinessScenarioWorkflowStartInput): Promise<{ run: BusinessWorkflowRun }> =>
+      ipcRenderer.invoke('business-workflow:start-scenario', input),
+    businessWorkflowRuns: (): Promise<{ runs: BusinessWorkflowRun[] }> => ipcRenderer.invoke('business-workflow:list'),
+    businessWorkflowRun: (runId: string): Promise<{ run: BusinessWorkflowRun | null }> => ipcRenderer.invoke('business-workflow:get', runId),
+    resumeBusinessWorkflow: (runId: string, checkpointOutput?: unknown): Promise<{ run: BusinessWorkflowRun }> =>
+      ipcRenderer.invoke('business-workflow:resume', runId, checkpointOutput),
+    retryBusinessWorkflow: (runId: string): Promise<{ run: BusinessWorkflowRun }> => ipcRenderer.invoke('business-workflow:retry', runId),
+    cancelBusinessWorkflow: (runId: string): Promise<{ run: BusinessWorkflowRun }> => ipcRenderer.invoke('business-workflow:cancel', runId),
+    onBusinessWorkflowChanged: (listener: (run: BusinessWorkflowRun) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, run: BusinessWorkflowRun): void => listener(run)
+      ipcRenderer.on('business-workflow:changed', handler)
+      return () => ipcRenderer.removeListener('business-workflow:changed', handler)
+    },
     showHarnessLog: (): Promise<void> => ipcRenderer.invoke('harness:show-log')
   })
 )
@@ -938,16 +954,24 @@ function renderAbout(): void {
   body.appendChild(line3)
 
   const line4 = element('p', 'about-line')
-  line4.textContent = `${zh ? '业务包版本： ' : 'Business package version: '}${info.businessPackageVersion}`
+  line4.textContent = `${zh ? '业务插件： ' : 'Business plugin: '}${info.businessPluginName}`
   body.appendChild(line4)
 
   const line5 = element('p', 'about-line')
-  line5.textContent = `${zh ? '业务 Build ID： ' : 'Business Build ID: '}${info.businessBuildId}`
+  line5.textContent = `Plugin ID: ${info.businessPluginId}`
   body.appendChild(line5)
 
   const line6 = element('p', 'about-line')
-  line6.textContent = `${zh ? '内置 Harness 版本： ' : 'Bundled Harness version: '}${info.harnessVersion}`
+  line6.textContent = `${zh ? '业务包版本： ' : 'Business package version: '}${info.businessPackageVersion}`
   body.appendChild(line6)
+
+  const line7 = element('p', 'about-line')
+  line7.textContent = `${zh ? '业务 Build ID： ' : 'Business Build ID: '}${info.businessBuildId}`
+  body.appendChild(line7)
+
+  const line8 = element('p', 'about-line')
+  line8.textContent = `${zh ? '内置 Harness 版本： ' : 'Bundled Harness version: '}${info.harnessVersion}`
+  body.appendChild(line8)
 
   const hint = element('p', 'about-hint')
   hint.textContent = zh ? 'Harness 随 DSH Desktop 更新。' : 'Harness is updated with DSH Desktop.'

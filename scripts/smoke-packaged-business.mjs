@@ -17,13 +17,14 @@ const node = join(resources, 'app', 'node_modules', 'node', 'bin', executable)
 const manifest = JSON.parse(await readFile(join(packageRoot, 'manifest.json'), 'utf8'))
 const userRoot = await mkdtemp(join(tmpdir(), 'dsh-packaged-business-'))
 const token = 'packaged-business-smoke-token-00000000000000000000'
+const workflowToken = 'packaged-business-workflow-token-000000000000000'
 let stderr = ''
 
 const child = fork(runtime, [packageRoot], {
   execPath: node,
   execArgv: [],
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_USER_ROOT: userRoot }
+  env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }
 })
 child.stderr?.on('data', (data) => { stderr += String(data) })
 

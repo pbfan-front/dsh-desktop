@@ -27,9 +27,10 @@ if (!exportOnly) {
 } else {
   console.log('[business:sync] export-only mode: reusing prebuilt web, index and mock platform outputs')
 }
-await access(join(webRoot, 'mm2606290', 'index.html'))
 await rm(stage, { recursive: true, force: true })
-run(process.execPath, [join(desktopRoot, 'scripts', 'export-business-package.mjs'), businessRoot, stage, webRoot], desktopRoot)
+run(process.execPath, [join(businessRoot, 'scripts', 'dsh-business-plugin.mjs'), 'export', stage], businessRoot, {
+  DSH_BUSINESS_WEB_ROOT: webRoot
+})
 
 let movedPrevious = false
 try {

@@ -37,6 +37,7 @@
     "business:export": "node scripts/sync-business-package.mjs --export-only",
     "business:verify": "node scripts/verify-business-package.mjs",
     "business:accept": "node scripts/accept-business-scenarios.mjs build/business-package",
+    "business:regression": "node scripts/run-business-regression.mjs",
     "release:preflight": "node scripts/release-preflight.mjs --channel production",
     "release:preflight:dev": "node scripts/release-preflight.mjs --channel development",
     "release:smoke:business": "node scripts/smoke-packaged-business.mjs",

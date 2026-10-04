@@ -47,12 +47,19 @@ export function aboutDetail(
   desktopVersion: string,
   harnessVersion: string | undefined,
   locale: 'en' | 'zh',
-  release?: { channel: string; platform: string; businessBuildId?: string; businessPackageVersion?: string }
+  release?: {
+    channel: string
+    platform: string
+    businessBuildId?: string
+    businessPackageVersion?: string
+    businessPluginId?: string
+    businessPluginName?: string
+  }
 ): string {
   const harness = harnessVersion ?? (locale === 'zh' ? '未知' : 'Unknown')
   const build = release?.businessBuildId ?? (locale === 'zh' ? '未知' : 'Unknown')
   if (locale === 'zh') {
-    return `DSH Desktop 版本：${desktopVersion}\n发布通道：${release?.channel ?? 'production'}\n运行平台：${release?.platform ?? process.platform}\n业务包版本：${release?.businessPackageVersion ?? '未知'}\n业务 Build ID：${build}\n内置 Harness 版本：${harness}\n\nHarness 随 DSH Desktop 更新。`
+    return `DSH Desktop 版本：${desktopVersion}\n发布通道：${release?.channel ?? 'production'}\n运行平台：${release?.platform ?? process.platform}\n业务插件：${release?.businessPluginName ?? '未知'}\nPlugin ID：${release?.businessPluginId ?? '未知'}\n业务包版本：${release?.businessPackageVersion ?? '未知'}\n业务 Build ID：${build}\n内置 Harness 版本：${harness}\n\nHarness 随 DSH Desktop 更新。`
   }
-  return `DSH Desktop version: ${desktopVersion}\nRelease channel: ${release?.channel ?? 'production'}\nPlatform: ${release?.platform ?? process.platform}\nBusiness package version: ${release?.businessPackageVersion ?? 'Unknown'}\nBusiness Build ID: ${build}\nBundled Harness version: ${harness}\n\nHarness is updated with DSH Desktop.`
+  return `DSH Desktop version: ${desktopVersion}\nRelease channel: ${release?.channel ?? 'production'}\nPlatform: ${release?.platform ?? process.platform}\nBusiness plugin: ${release?.businessPluginName ?? 'Unknown'}\nPlugin ID: ${release?.businessPluginId ?? 'Unknown'}\nBusiness package version: ${release?.businessPackageVersion ?? 'Unknown'}\nBusiness Build ID: ${build}\nBundled Harness version: ${harness}\n\nHarness is updated with DSH Desktop.`
 }

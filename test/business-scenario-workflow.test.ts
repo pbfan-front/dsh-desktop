@@ -1,0 +1,143 @@
+import { describe, expect, it, vi } from 'vitest'
+import { registerBusinessScenarioWorkflow } from '../src/main/business-scenario-workflow'
+import { BusinessWorkflowRuntime } from '../src/main/business-workflow-runtime'
+
+const startInput = {
+  routePath: '/credit/productCombine',
+  query: '额度页核额失败',
+  apiUrls: ['/quota/query.json'],
+  sessionId: 'session-1'
+}
+
+const plan = {
+  profileId: 'quota_failed',
+  label: '核额失败',
+  page: 'productCombine',
+  scenarios: [{ id: 'quota_fail', apiUrl: '/quota/query.json', data: { result: 'FAIL' } }]
+}
+
+const verification = {
+  route: '/credit/productCombine',
+  containsText: ['核额失败'],
+  absentText: ['系统繁忙']
+}
+
+describe('business scenario workflow', () => {
+  it('connects analysis, confirmed creation, apply and page verification in order', async () => {
+    let sequence = 0
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => `run-${++sequence}` })
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1', apis: ['/quota/query.json'] }
+      if (path === '/__desktop/create-profile') return { operationId: 'operation-1', profileId: plan.profileId }
+      if (path === '/__desktop/apply') return { status: 'applied-command' }
+      return { verified: true, checks: {
+        currentProfile: true,
+        observationCurrent: true,
+        route: true,
+        containsText: verification.containsText.map(text => ({ text, passed: true })),
+        absentText: verification.absentText.map(text => ({ text, passed: true })),
+        scenarios: [{ scenarioId: 'quota_fail', passed: true }]
+      } }
+    })
+    const start = registerBusinessScenarioWorkflow({
+      runtime,
+      pluginId: 'com.dataelement.demo-test',
+      requestBusiness
+    })
+
+    const analyzed = await start(startInput)
+    expect(analyzed.status).toBe('waiting_for_user')
+    expect(analyzed.currentStepId).toBe('confirm-plan')
+    expect(requestBusiness).toHaveBeenNthCalledWith(1, '/__desktop/analyze-target', {
+      routePath: startInput.routePath,
+      query: startInput.query,
+      apiUrls: startInput.apiUrls
+    }, startInput.sessionId)
+
+    const applied = await runtime.resume(analyzed.id, plan)
+    expect(applied.status).toBe('waiting_for_user')
+    expect(applied.currentStepId).toBe('wait-for-preview')
+    expect(requestBusiness).toHaveBeenNthCalledWith(2, '/__desktop/create-profile', expect.objectContaining({
+      evidenceId: 'evidence-1',
+      profile: expect.objectContaining({ id: plan.profileId }),
+      scenarios: plan.scenarios
+    }), startInput.sessionId)
+    expect(requestBusiness).toHaveBeenNthCalledWith(3, '/__desktop/apply', { profileId: plan.profileId }, startInput.sessionId)
+
+    const completed = await runtime.resume(applied.id, verification)
+    expect(completed.status).toBe('completed')
+    expect(completed.steps.map((step) => step.status)).toEqual([
+      'completed', 'completed', 'completed', 'completed', 'completed', 'completed'
+    ])
+    expect(requestBusiness).toHaveBeenNthCalledWith(4, '/__desktop/verify', verification, startInput.sessionId)
+  })
+
+  it('stops safely before writes when the confirmed plan is invalid', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-invalid' })
+    const requestBusiness = vi.fn(async () => ({ evidenceId: 'evidence-1' }))
+    const start = registerBusinessScenarioWorkflow({
+      runtime,
+      pluginId: 'com.dataelement.demo-test',
+      requestBusiness
+    })
+
+    const analyzed = await start(startInput)
+    const failed = await runtime.resume(analyzed.id, { profileId: '../unsafe', scenarios: [] })
+    expect(failed.status).toBe('failed')
+    expect(failed.currentStepId).toBe('create-profile')
+    expect(failed.steps[2]?.error?.message).toContain('profileId')
+    expect(requestBusiness).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits an absent optional sessionId from the persisted workflow context', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-no-session' })
+    const requestBusiness = vi.fn(async () => ({ evidenceId: 'evidence-1' }))
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+
+    const run = await start({ routePath: startInput.routePath, query: startInput.query })
+    expect(run.status).toBe('waiting_for_user')
+    expect(run.context).not.toHaveProperty('sessionId')
+  })
+
+  it('keeps a failed business write retryable and resumes from that step only', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-retry' })
+    let createAttempts = 0
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1' }
+      if (path === '/__desktop/create-profile' && ++createAttempts === 1) throw new Error('temporary write failure')
+      return { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+
+    const analyzed = await start(startInput)
+    const failed = await runtime.resume(analyzed.id, plan)
+    expect(failed.status).toBe('failed')
+    expect(failed.currentStepId).toBe('create-profile')
+
+    const retried = await runtime.retry(failed.id)
+    expect(retried.status).toBe('waiting_for_user')
+    expect(retried.currentStepId).toBe('wait-for-preview')
+    expect(createAttempts).toBe(2)
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/analyze-target')).toHaveLength(1)
+  })
+
+  it('cannot complete when the verification handler returns success without real request evidence', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-gate' })
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1' }
+      if (path === '/__desktop/verify') return { verified: true, checks: {
+        currentProfile: true, observationCurrent: true, route: true,
+        containsText: [{ text: '核额失败', passed: true }], absentText: [], scenarios: []
+      } }
+      return { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    const waiting = await runtime.resume(analyzed.id, plan)
+    const rejected = await runtime.resume(waiting.id, verification)
+
+    expect(rejected.status).toBe('failed')
+    expect(rejected.currentStepId).toBe('verify-preview')
+    expect(rejected.steps[5]?.error).toMatchObject({ code: 'WORKFLOW_GATE_REJECTED', retryable: true })
+  })
+})

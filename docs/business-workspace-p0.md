@@ -47,6 +47,7 @@ DSH_BUSINESS_PACKAGE="$PWD/build/business-package" npm run dev
 npm run typecheck
 npm run business:verify
 npm run business:accept
+npm run business:regression
 npx vitest run test/business-plugin.test.ts test/runtime.test.ts
 node scripts/test-business-runtime.mjs build/business-package
 ```
@@ -59,7 +60,15 @@ npm run dev:business
 
 该命令同时启动 `demo-test` 的 local-mock dev server 和 Desktop 源码开发进程。侧栏仍由 Desktop 业务运行时管理 Profile 和证据，内部业务 iframe 改为加载 dev server，业务源码保存后可热更新。开发 Mock 数据写入 `build/business-dev-user-data`，不与安装版用户数据混用。
 
-`business:accept` 使用临时用户目录验收两个真实业务基准：借据列表“借据状态正常”和额度页“核额失败”。它要求 CodeIntell 自动识别目标 API，随后创建并应用临时 Profile，检查 Mock 命中头及关键业务字段，最后回滚全部写入。
+`business:accept` 使用临时用户目录验收 15 个黄金数据链路场景，覆盖借据、额度、企个切换、套餐、收款账户、借款申请、KYC 和还款试算的正常与失败分支。它要求 CodeIntell 自动识别目标 API，随后创建并应用临时 Profile，检查 Mock 命中头及关键业务字段，最后回滚全部写入。
+
+业务插件、Desktop 运行时或 CodeIntell 更新后，统一运行：
+
+```bash
+npm run business:regression
+```
+
+该命令依次执行业务包完整性校验、业务运行时回归和 15 个黄金场景验收。结果会写入 `build/reports/business-regression/latest.json`，并按执行时间保留一份历史报告。报告属于本机构建证据，不提交 Git，也不会自动加入每次打包流程；打包仍只执行较快的 `business:verify`。
 
 运行时连接描述文件位于 Desktop 自身的 userData 目录，权限为 `0600`。不要复制该文件或其中令牌。也不要把业务服务固定到 8094；随机端口用于避免干扰 VSCode 中的开发服务。
 

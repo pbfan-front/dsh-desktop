@@ -1,6 +1,13 @@
 import { initializeDesktopService, desktopDiagnostics } from './desktop-service'
 import { BusinessPreview } from './business-preview'
+import { registerBusinessWorkflowHandlers } from './business-workflow-ipc'
+import { createPersistentBusinessWorkflowRuntime } from './business-workflow-store'
+import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
+import { BUSINESS_SCENARIO_WORKFLOW_ID, registerBusinessScenarioWorkflow } from './business-scenario-workflow'
+import { parseBusinessPluginWorkflows } from './business-plugin-contract'
+import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
 import { ensureBusinessWorkspace } from './business-workspace'
+import { reconcileBusinessWorkspaceRecords } from './business-workspace-registry'
 import {
   installBusinessPackage,
   resolveActiveBusinessPackage,
@@ -219,6 +226,8 @@ const PLUGIN_RECOVERY_ACTIONS = new Set<PluginRecoveryAction>([
 
 let mainWindow: BrowserWindow | undefined
 let businessPreview: BusinessPreview | undefined
+let businessWorkflowRuntime: BusinessWorkflowRuntime | undefined
+let startBusinessScenarioWorkflow: ((input: BusinessScenarioWorkflowStartInput) => Promise<BusinessWorkflowRun>) | undefined
 let windowsMenuView: WebContentsView | undefined
 let windowsMenuOpen = false
 let windowsMenuDark = false
@@ -381,6 +390,8 @@ async function desktopAboutInfo(): Promise<{
   harnessVersion: string
   businessBuildId: string
   businessPackageVersion: string
+  businessPluginId: string
+  businessPluginName: string
   channel: 'development' | 'production'
   platform: string
   locale: 'en' | 'zh'
@@ -392,7 +403,12 @@ async function desktopAboutInfo(): Promise<{
     businessDataRootPath(),
     app.getVersion()
   )
-  let activeManifest: { buildId?: unknown; packageVersion?: unknown } = {}
+  let activeManifest: {
+    buildId?: unknown
+    packageVersion?: unknown
+    pluginId?: unknown
+    displayName?: unknown
+  } = {}
   try {
     activeManifest = JSON.parse(readFileSync(join(activePackageRoot, 'manifest.json'), 'utf8')) as typeof activeManifest
   } catch { /* displayed as unknown below */ }
@@ -407,6 +423,12 @@ async function desktopAboutInfo(): Promise<{
     businessPackageVersion: typeof activeManifest.packageVersion === 'string'
       ? activeManifest.packageVersion
       : (locale === 'zh' ? '内置旧版' : 'Bundled legacy'),
+    businessPluginId: typeof activeManifest.pluginId === 'string'
+      ? activeManifest.pluginId
+      : 'com.dataelement.demo-test',
+    businessPluginName: typeof activeManifest.displayName === 'string'
+      ? activeManifest.displayName
+      : (locale === 'zh' ? '内置业务体验' : 'Bundled business experience'),
     channel: desktopReleaseChannel(app.getAppPath(), app.isPackaged),
     platform: `${process.platform}/${process.arch}`,
     locale
@@ -3480,17 +3502,62 @@ async function bootstrap(): Promise<void> {
     ? resolve(process.env.DSH_BUSINESS_USER_ROOT)
     : undefined
   const businessDataRoot = businessDataRootPath()
+  const workflowState = await createPersistentBusinessWorkflowRuntime({
+    storagePath: join(businessDataRoot, 'workflow-runs.json'),
+    runtime: {
+      onRunChanged: (run) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('business-workflow:changed', run)
+        }
+      }
+    }
+  })
+  businessWorkflowRuntime = workflowState.runtime
+  if (workflowState.recovery.quarantinedPath) {
+    console.warn(`[business-workflow] Invalid state quarantined at ${workflowState.recovery.quarantinedPath}`)
+  }
+  if (workflowState.recovery.recoveredInterruptedRuns > 0) {
+    console.warn(`[business-workflow] Recovered ${workflowState.recovery.recoveredInterruptedRuns} interrupted run(s).`)
+  }
   const businessPackage = process.env.DSH_BUSINESS_PACKAGE || await resolveActiveBusinessPackage(
     bundledBusinessPackage,
     businessDataRoot,
     app.getVersion()
   )
   if (existsSync(join(businessPackage, 'manifest.json'))) {
+    const businessManifest = JSON.parse(readFileSync(join(businessPackage, 'manifest.json'), 'utf8')) as {
+      pluginId?: unknown
+      projectId?: unknown
+      displayName?: unknown
+      sourceRoot?: unknown
+      workflows?: unknown
+    }
     process.env.DSH_BUSINESS_CONNECTION_FILE = join(businessDataRoot, 'connection.json')
     const configuredBusinessSource = !app.isPackaged && process.env.DSH_BUSINESS_SOURCE_ROOT
       ? resolve(process.env.DSH_BUSINESS_SOURCE_ROOT)
       : undefined
     const businessSource = configuredBusinessSource || await ensureBusinessWorkspace(businessPackage, businessDataRoot)
+    if (typeof businessManifest.projectId === 'string' && typeof businessManifest.displayName === 'string') {
+      const packagedSource = typeof businessManifest.sourceRoot === 'string'
+        ? resolve(businessPackage, businessManifest.sourceRoot)
+        : businessSource
+      const reconciliation = await reconcileBusinessWorkspaceRecords(
+        join(app.getPath('userData'), 'harness', 'storages', 'workspace.json'),
+        {
+          canonicalPath: businessSource,
+          projectId: businessManifest.projectId,
+          displayName: businessManifest.displayName,
+          knownLegacyPaths: [
+            join(businessDataRoot, 'workspace'),
+            packagedSource,
+            join(desktopResourcePath('business-package'), 'source')
+          ]
+        }
+      )
+      if (reconciliation.changed) {
+        console.log(`[business] Workspace registry normalized; removed=${reconciliation.removedWorkspaceIds.length}, preserved=${reconciliation.preservedWorkspaceIds.length}`)
+      }
+    }
     businessPreview = new BusinessPreview({
       packageRoot: businessPackage, sourceRoot: businessSource,
       entry: desktopResourcePath('business-runtime.mjs'), node: bundledNodePath(),
@@ -3501,8 +3568,33 @@ async function bootstrap(): Promise<void> {
       onStateChange: state => {
         console.log(`[business] state=${state.phase} attempt=${state.attempt}${state.error ? ` error=${state.error}` : ''}`)
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('business:preview-state', state)
+      },
+      onWorkflowCommand: async ({ action, payload }) => {
+        if (!businessWorkflowRuntime) throw new Error('Business workflow runtime is unavailable.')
+        if (action === 'start-scenario') {
+          if (!startBusinessScenarioWorkflow) throw new Error('Business scenario workflow is unavailable.')
+          return startBusinessScenarioWorkflow(payload as BusinessScenarioWorkflowStartInput)
+        }
+        if (action === 'list') return { runs: businessWorkflowRuntime.listRuns() }
+        const input = payload && typeof payload === 'object' && !Array.isArray(payload)
+          ? payload as Record<string, unknown>
+          : {}
+        if (typeof input.runId !== 'string') throw new Error('Workflow runId is required.')
+        if (action === 'get') return { run: businessWorkflowRuntime.getRun(input.runId) ?? null }
+        if (action === 'resume') return businessWorkflowRuntime.resume(input.runId, input.checkpointOutput)
+        if (action === 'retry') return businessWorkflowRuntime.retry(input.runId)
+        return businessWorkflowRuntime.cancel(input.runId)
       }
     })
+    if (typeof businessManifest.pluginId === 'string' && businessWorkflowRuntime) {
+      const declaredWorkflows = parseBusinessPluginWorkflows(businessManifest as Record<string, unknown>)
+      startBusinessScenarioWorkflow = registerBusinessScenarioWorkflow({
+        runtime: businessWorkflowRuntime,
+        pluginId: businessManifest.pluginId,
+        definition: declaredWorkflows.find(workflow => workflow.id === BUSINESS_SCENARIO_WORKFLOW_ID),
+        requestBusiness: (path, body, sessionId) => businessPreview!.controlRequest(path, body, sessionId, true)
+      })
+    }
     try { await businessPreview.start() } catch (error) { console.error('[business] Startup failed:', error) }
   }
   desktopDiagnostics?.startSending()
@@ -3558,6 +3650,15 @@ async function bootstrap(): Promise<void> {
     }
   })
   registerHarnessHandlers()
+  registerBusinessWorkflowHandlers({
+    ipcMain,
+    runtime: () => businessWorkflowRuntime,
+    assertTrustedEvent: assertTrustedMainWindowEvent,
+    startScenario: (input) => {
+      if (!startBusinessScenarioWorkflow) throw new Error('Business scenario workflow is not available.')
+      return startBusinessScenarioWorkflow(input)
+    }
+  })
   mobileBridge = new LanMobileBridge({
     harnessUrl: () => runtime.snapshot().url,
     harnessAuthToken: () => runtime.snapshot().authToken,

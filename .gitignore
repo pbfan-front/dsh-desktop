@@ -1,7 +1,9 @@
 node_modules/
 build/business-package*/
 build/business-dev-user-data/
+build/reports/
 build/connection.json
+build/workflow-runs.json
 build/workspace/
 build/.workspace-staging-*/
 build/.workspace-previous-*/

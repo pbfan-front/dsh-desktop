@@ -2,10 +2,11 @@ import { fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 const token = randomBytes(32).toString('hex')
+const workflowToken = randomBytes(32).toString('hex')
 const userRoot = await mkdtemp(resolve(tmpdir(), 'dsh-business-user-'))
 const legacyProfileDir = resolve(userRoot, 'src/baseTypes/api')
 const legacyMockDir = resolve(legacyProfileDir, 'refactor/queryMultiEnterpriseListII')
@@ -18,11 +19,16 @@ await writeFile(resolve(legacyMockDir, 'mock.json'), JSON.stringify({ label: 'le
   scenarios: [{ id: 'legacy_scenario', label: 'Legacy scenario', data: { status: '0', msg: 'ok', data: { array: [] } } }] }))
 const child = fork(resolve('build/business-runtime.mjs'), [resolve(process.argv[2] || 'build/business-package')], {
   execPath: resolve('node_modules/node/bin/node'), execArgv: [],
-  env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
+  env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
 })
 child.stderr.on('data', data => process.stderr.write(data))
 const childMessages = []
-child.on('message', value => childMessages.push(value))
+child.on('message', value => {
+  childMessages.push(value)
+  if (value?.type === 'workflow-request') {
+    child.send({ type: 'workflow-response', id: value.id, ok: true, result: { action: value.action, payload: value.payload } })
+  }
+})
 try {
   const ready = await new Promise((done, reject) => {
     const timer = setTimeout(() => reject(new Error('Startup timeout')), 60_000)
@@ -32,6 +38,15 @@ try {
   })
   const get = (path, options = {}) => fetch(new URL(path, ready.origin), options)
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+  const workflowHeaders = { ...headers, 'X-DSH-Workflow-Token': workflowToken }
+  assert.equal((await get('/__desktop/workflow/start-scenario', { method: 'POST', body: '{}' })).status, 401)
+  const workflowBridgeResponse = await get('/__desktop/workflow/start-scenario', {
+    method: 'POST', headers: { ...headers, 'X-DSH-Session': 'workflow-test' }, body: JSON.stringify({ routePath: '/credit/productCombine', query: '核额失败' })
+  })
+  assert.equal(workflowBridgeResponse.status, 200)
+  assert.deepEqual(await workflowBridgeResponse.json(), {
+    action: 'start-scenario', payload: { routePath: '/credit/productCombine', query: '核额失败', sessionId: 'workflow-test' }
+  })
   assert.equal((await get('/__desktop/profiles')).status, 401)
   assert.equal((await get('/__desktop/state', { headers: { Origin: 'https://example.com' } })).status, 403)
   assert.equal((await get('/api/agent/mock', { method: 'POST' })).status, 403)
@@ -45,6 +60,21 @@ try {
   assert.ok(context.codeIntell.coverage.routes > 0)
   const codeIntellStatus = await (await get('/__desktop/code-intell/status', { headers })).json()
   assert.equal(codeIntellStatus.state, 'ready', JSON.stringify(codeIntellStatus))
+  const defaultAnalysisMode = await (await get('/__desktop/analysis-mode', { headers })).json()
+  assert.equal(defaultAnalysisMode.mode, 'strict')
+  assert.equal(defaultAnalysisMode.cacheEntries, 0)
+  const assistedModeResponse = await get('/__desktop/analysis-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'assisted' })
+  })
+  assert.equal(assistedModeResponse.status, 200)
+  assert.equal((await assistedModeResponse.json()).mode, 'assisted')
+  const defaultWorkflowMode = await (await get('/__desktop/workflow-mode', { headers })).json()
+  assert.equal(defaultWorkflowMode.mode, 'workflow')
+  const blockedLegacy = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' }) })
+  assert.equal(blockedLegacy.status, 409)
+  const legacyModeResponse = await get('/__desktop/workflow-mode/set', { method: 'POST', headers, body: JSON.stringify({ mode: 'legacy' }) })
+  assert.equal(legacyModeResponse.status, 200)
+  assert.equal((await legacyModeResponse.json()).mode, 'legacy')
   const page = await get('/?desktop=1'); assert.equal(page.status, 200)
   const frame = await get(context.state.url.split('#')[0]); assert.equal(frame.status, 200)
   const catalogResponse = await get('/api/profiles')
@@ -58,11 +88,26 @@ try {
   assert.equal(receiptAnalysisResponse.status, 200, JSON.stringify(receiptAnalysis))
   assert.equal(receiptAnalysis.route.path, '/repay/receiptList')
   assert.ok(receiptAnalysis.apis.some(item => item.apiUrl === '/loanNbr/loanNbr.json'), JSON.stringify(receiptAnalysis).slice(0, 4000))
+  assert.equal(receiptAnalysis.acceleration.mode, 'assisted')
+  assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
+  const cachedReceiptAnalysis = await (await get('/__desktop/analyze-target', {
+    method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })).json()
+  assert.equal(cachedReceiptAnalysis.acceleration.usedCache, true, JSON.stringify(cachedReceiptAnalysis.acceleration))
+  assert.equal(cachedReceiptAnalysis.acceleration.sourceRevalidated, true)
+  const strictModeResponse = await get('/__desktop/analysis-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'strict' })
+  })
+  assert.equal(strictModeResponse.status, 200)
+  assert.equal((await strictModeResponse.json()).mode, 'strict')
+  const clearAnalysisCacheResponse = await get('/__desktop/analysis-cache/clear', { method: 'POST', headers, body: '{}' })
+  assert.equal(clearAnalysisCacheResponse.status, 200)
+  assert.equal((await clearAnalysisCacheResponse.json()).cacheEntries, 0)
   const unsupportedExplicit = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
     routePath: '/credit/productCombine', query: '不存在的接口', apiUrls: ['/missing/notFound.json']
   }) })
   assert.equal(unsupportedExplicit.status, 422)
-  assert.match((await unsupportedExplicit.json()).error, /lacks CodeIntell\/source evidence/)
+  assert.match((await unsupportedExplicit.json()).error, /^E_API_ROUTE_EVIDENCE_GAP:/)
   const firstMockAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
     routePath: '/face/home', query: 'KYC 刷脸', apiUrls: ['/cloudiii/getKycFaceId.json']
   }) })
@@ -187,9 +232,34 @@ try {
   assert.equal(scenarioResult.stages.requestHit.passed, true)
   assert.equal(scenarioResult.stages.verified.passed, true)
   assert.ok(scenarioResult.apiBindings.some(item => item.apiUrl === '/refactor/queryMultiEnterpriseListII.json' && item.hit))
+  const restoredWorkflowModeResponse = await get('/__desktop/workflow-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'workflow' })
+  })
+  assert.equal(restoredWorkflowModeResponse.status, 200)
+  const restoredWorkflowMode = await restoredWorkflowModeResponse.json()
+  assert.equal(restoredWorkflowMode.mode, 'workflow')
+  const blockedAfterRestore = await get('/__desktop/analyze-target', {
+    method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })
+  assert.equal(blockedAfterRestore.status, 409)
+  assert.match((await blockedAfterRestore.json()).error, /workflow mode/i)
+  const internalWorkflowAnalysis = await get('/__desktop/analyze-target', {
+    method: 'POST', headers: workflowHeaders, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })
+  assert.equal(internalWorkflowAnalysis.status, 200, await internalWorkflowAnalysis.text())
+  const workflowModeStatus = await (await get('/__desktop/workflow-mode', { headers })).json()
+  const auditEntries = (await readFile(workflowModeStatus.auditFile, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+  assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'blocked'))
+  assert.ok(auditEntries.some(item => item.mode === 'legacy' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
+  assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
   const rolledBack = await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: imported.operationId }) })
   assert.equal(rolledBack.status, 200)
+  const rolledBackResult = await rolledBack.json()
+  assert.ok(rolledBackResult.resetSessionIds.includes('default'))
+  assert.ok(rolledBackResult.resetSessionIds.includes('session-a'))
   assert.ok(!(await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
+  assert.equal((await (await get('/__desktop/state', { headers })).json()).profileId, '')
+  assert.equal((await (await get('/__desktop/state', { headers: sessionAHeaders })).json()).profileId, '')
   console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId, apiBindingsVerified: checked + 1, browserOutcomeVerified: true }))
 } finally {
   if (child.exitCode === null) {

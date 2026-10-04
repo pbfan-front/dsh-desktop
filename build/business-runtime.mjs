@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -22,6 +22,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     : await within(packageRoot, manifest.sourceRoot)
   userRoot = resolve(userRoot || process.env.DSH_BUSINESS_USER_ROOT || join(packageRoot, '.user-data'))
   await mkdir(userRoot, { recursive: true })
+  const workflowToken = process.env.DSH_BUSINESS_WORKFLOW_TOKEN
+  if (typeof workflowToken !== 'string' || workflowToken.length < 32) throw new Error('A private Desktop workflow token is required')
   if (!/^\/[a-zA-Z0-9_-]+\/$/.test(manifest.businessPath)) throw new Error('Invalid business entry path')
   const configuredAppUrl = process.env.DSH_BUSINESS_APP_URL
   let developmentAppUrl
@@ -81,10 +83,48 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   }
   await refreshCodeIntell(true)
   const analysisEvidence = new Map()
+  const workflowRequests = new Map()
+  const handleWorkflowResponse = message => {
+    if (message?.type !== 'workflow-response' || typeof message.id !== 'string') return
+    const pending = workflowRequests.get(message.id)
+    if (!pending) return
+    workflowRequests.delete(message.id)
+    clearTimeout(pending.timer)
+    if (message.ok) pending.resolve(message.result)
+    else pending.reject(new Error(typeof message.error === 'string' ? message.error : 'Desktop workflow request failed'))
+  }
+  process.on('message', handleWorkflowResponse)
+  const requestDesktopWorkflow = (action, payload) => new Promise((resolveRequest, rejectRequest) => {
+    if (!process.send) return rejectRequest(new Error('Desktop workflow bridge is unavailable'))
+    const id = randomUUID()
+    const timer = setTimeout(() => {
+      workflowRequests.delete(id)
+      rejectRequest(new Error('Desktop workflow request timed out'))
+    }, 30_000)
+    timer.unref()
+    workflowRequests.set(id, { resolve: resolveRequest, reject: rejectRequest, timer })
+    process.send({ type: 'workflow-request', id, action, payload })
+  })
+  const analysisPreferenceFile = join(userRoot, 'analysis-preferences.json')
+  const workflowPreferenceFile = join(userRoot, 'workflow-preferences.json')
+  const workflowAuditFile = join(userRoot, 'workflow-mode-audit.jsonl')
+  const analysisCacheFile = join(userRoot, 'analysis-candidate-cache.json')
   const USER_DATA_SCHEMA_VERSION = 2
   const USER_DATA_PACKAGE_KIND = 'dsh-business-user-mocks'
   const profileFile = join(source, 'src/baseTypes/api/mock-profiles.json')
   const userProfileFile = join(userRoot, 'src/baseTypes/api/mock-profiles.json')
+  const readWorkflowPreferences = async () => {
+    try {
+      const value = JSON.parse(await readFile(workflowPreferenceFile, 'utf8'))
+      return { schemaVersion: 1, mode: value.mode === 'legacy' ? 'legacy' : 'workflow', updatedAt: value.updatedAt || null }
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid workflow preferences: ${error.message}`)
+      return { schemaVersion: 1, mode: 'workflow', updatedAt: null }
+    }
+  }
+  const auditWorkflowMode = async (entry) => {
+    await appendFile(workflowAuditFile, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, { encoding: 'utf8', mode: 0o600 })
+  }
   const readProfiles = async file => {
     try {
       const data = JSON.parse(await readFile(file, 'utf8'))
@@ -146,6 +186,23 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const temporary = `${file}.${process.pid}.tmp`
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
     await rename(temporary, file)
+  }
+  const readAnalysisPreferences = async () => {
+    try {
+      const value = JSON.parse(await readFile(analysisPreferenceFile, 'utf8'))
+      return { schemaVersion: 1, mode: value.mode === 'assisted' ? 'assisted' : 'strict' }
+    } catch (error) {
+      if (error.code === 'ENOENT') return { schemaVersion: 1, mode: 'strict' }
+      throw error
+    }
+  }
+  const readAnalysisCache = async () => {
+    try {
+      const value = JSON.parse(await readFile(analysisCacheFile, 'utf8'))
+      return value?.schemaVersion === 1 && plainObject(value.entries) ? value : { schemaVersion: 1, entries: {} }
+    } catch {
+      return { schemaVersion: 1, entries: {} }
+    }
   }
   const contentHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const scenarioArray = config => Array.isArray(config?.scenarios)
@@ -335,7 +392,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return [...new Set(fields)].slice(0, 120)
   }
-  const analyzeTarget = async input => {
+  const analyzeTarget = async (input, sessionId = 'default') => {
     await refreshCodeIntell()
     if (codeIntellStatus.state !== 'ready') throw new Error(`CodeIntell unavailable: ${codeIntellStatus.error}`)
     const routePath = String(input?.routePath || '').trim()
@@ -433,8 +490,43 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
     for (const apiUrl of explicitApis) {
       if (typeof apiUrl !== 'string') continue
-      if (!apiMap.has(apiUrl)) throw new Error(`Explicit API lacks CodeIntell/source evidence for this route: ${apiUrl}`)
+      if (!apiMap.has(apiUrl)) throw new Error([
+        `E_API_ROUTE_EVIDENCE_GAP: explicit API lacks current CodeIntell/source evidence for this route: ${apiUrl}.`,
+        'Stop analysis for this API; do not search generated CodeIntell files or retry URL variants.',
+        'This is commonly a dynamic or untrackable call. Report the evidence gap and offer either a reviewed business-source Mock change or a separate CodeIntell dynamic-call enhancement.'
+      ].join(' '))
       apiMap.get(apiUrl).score += 160
+    }
+    const preferences = await readAnalysisPreferences()
+    const acceleration = {
+      mode: preferences.mode,
+      usedCache: false,
+      usedRecentRequests: false,
+      cacheKey: null,
+      prioritizedApiUrls: [],
+      sourceRevalidated: true,
+      fallback: preferences.mode === 'strict' ? 'strict-mode' : null
+    }
+    if (preferences.mode === 'assisted') {
+      const sourceDigest = codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp
+      const cacheKey = contentHash({ sourceDigest, routePath: route.path, queryTerms })
+      acceleration.cacheKey = cacheKey
+      const cache = await readAnalysisCache()
+      const cached = cache.entries[cacheKey]
+      const recentApis = evidence
+        .filter(item => item.sessionId === sessionId && typeof item.path === 'string' && item.path.endsWith('.json'))
+        .slice(-30)
+        .map(item => item.path)
+      const cachedApis = cached?.sourceDigest === sourceDigest && Array.isArray(cached.apiUrls) ? cached.apiUrls : []
+      for (const apiUrl of [...new Set([...recentApis, ...cachedApis])]) {
+        const candidate = apiMap.get(apiUrl)
+        if (!candidate) continue
+        candidate.score += recentApis.includes(apiUrl) ? 220 : 80
+        acceleration.prioritizedApiUrls.push(apiUrl)
+      }
+      acceleration.usedCache = cachedApis.some(apiUrl => apiMap.has(apiUrl))
+      acceleration.usedRecentRequests = recentApis.some(apiUrl => apiMap.has(apiUrl))
+      if (!acceleration.usedCache && !acceleration.usedRecentRequests) acceleration.fallback = 'no-valid-hints'
     }
     const apis = []
     for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
@@ -461,10 +553,27 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const evidenceId = randomUUID()
     const result = { evidenceId, expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), query: input.query || '',
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
-      routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })), apis }
+      routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })),
+      apis,
+      acceleration
+    }
     analysisEvidence.set(evidenceId, { routePath: route.path,
       apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
       expiresAt: Date.now() + 30 * 60_000 })
+    if (preferences.mode === 'assisted' && acceleration.cacheKey) {
+      const cache = await readAnalysisCache()
+      cache.entries[acceleration.cacheKey] = {
+        sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
+        routePath: route.path,
+        query: input.query || '',
+        apiUrls: apis.slice(0, 12).map(api => api.apiUrl),
+        updatedAt: new Date().toISOString()
+      }
+      const entries = Object.entries(cache.entries)
+        .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
+        .slice(0, 100)
+      await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: Object.fromEntries(entries) })
+    }
     return result
   }
   await migrateUserData()
@@ -477,6 +586,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid preview state: ${error.message}`)
   }
+  const availableProfileIdsAtStartup = new Set((await catalog()).map(profile => profile.id))
   const sessionStates = new Map()
   const pageObservations = new Map()
   const verificationResults = new Map()
@@ -495,10 +605,13 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const restored = persistedSessionStates[sessionId]
       if (plainObject(restored) && typeof restored.route === 'string' && restored.route.startsWith('/') && !restored.route.startsWith('//')) {
         const target = new URL(businessAppUrl(restored.route.slice(0, 500)))
-        if (typeof restored.profileId === 'string' && restored.profileId) target.searchParams.set('__mockProfile', restored.profileId)
+        const restoredProfileId = typeof restored.profileId === 'string' && availableProfileIdsAtStartup.has(restored.profileId)
+          ? restored.profileId
+          : ''
+        if (restoredProfileId) target.searchParams.set('__mockProfile', restoredProfileId)
         target.searchParams.set('__dshSession', sessionId)
         sessionStates.set(sessionId, { revision: Number.isInteger(restored.revision) ? restored.revision : 0,
-          profileId: typeof restored.profileId === 'string' ? restored.profileId : '', url: target.href, verified: false })
+          profileId: restoredProfileId, url: target.href, verified: false })
       } else sessionStates.set(sessionId, initialState())
     }
     return sessionStates.get(sessionId)
@@ -514,9 +627,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     await atomicJson(runtimeStateFile, { schemaVersion: 1, projectId: manifest.projectId, sessions, updatedAt: new Date().toISOString() })
   }
   const evidence = []
+  const externalEvidenceFile = join(userRoot, '.runtime-evidence.jsonl')
+  const externalEvidence = async () => {
+    try {
+      const lines = (await readFile(externalEvidenceFile, 'utf8')).trim().split('\n').slice(-200)
+      return lines.flatMap(line => {
+        try {
+          const value = JSON.parse(line)
+          return plainObject(value) ? [value] : []
+        } catch { return [] }
+      })
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid external evidence: ${error.message}`)
+      return []
+    }
+  }
   const scenarioResult = async (sessionId, state, pageObservation) => {
     const profile = (await profileSummaries()).find(item => item.id === state.profileId)
-    const requests = evidence.filter(item => item.sessionId === sessionId && item.revision === state.revision)
+    const requests = [...evidence, ...(await externalEvidence())].filter(item => item.sessionId === sessionId
+      && item.profileId === state.profileId && (item.revision === undefined || item.revision === state.revision))
     const matchedScenarios = new Set(requests.map(item => item.scenarioId).filter(Boolean))
     const apiBindings = (profile?.apis || []).map(api => ({
       apiUrl: api.apiUrl, scenarioId: api.scenarioId, hit: matchedScenarios.has(api.scenarioId),
@@ -579,8 +708,58 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         const publicRead = req.method === 'GET' && ['/__desktop/state', '/__desktop/result-ui'].includes(url.pathname)
         const trustedUI = ['/__desktop/apply-ui', '/__desktop/page-observation-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
         if (!publicRead && !trustedUI && req.headers.authorization !== `Bearer ${token}`) return respond(res, 401, { error: 'Unauthorized' })
-        if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state, userData: userDataStatus, codeIntell: await refreshCodeIntell() })
+        if (url.pathname.startsWith('/__desktop/workflow/') && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
+          const payload = body ? JSON.parse(body) : {}
+          const action = {
+            '/__desktop/workflow/start-scenario': 'start-scenario',
+            '/__desktop/workflow/resume': 'resume',
+            '/__desktop/workflow/retry': 'retry',
+            '/__desktop/workflow/cancel': 'cancel',
+            '/__desktop/workflow/list': 'list',
+            '/__desktop/workflow/get': 'get'
+          }[url.pathname]
+          if (!action) return respond(res, 404, { error: 'Unknown workflow command' })
+          const workflowPayload = action === 'start-scenario' && plainObject(payload)
+            ? { ...payload, sessionId }
+            : payload
+          try {
+            await auditWorkflowMode({ mode: 'workflow', action, sessionId, outcome: 'allowed' })
+            return respond(res, 200, await requestDesktopWorkflow(action, workflowPayload))
+          }
+          catch (error) { return respond(res, 422, { error: error.message }) }
+        }
+        if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state, userData: userDataStatus, codeIntell: await refreshCodeIntell(), analysis: await readAnalysisPreferences(), workflow: await readWorkflowPreferences() })
         if (url.pathname === '/__desktop/code-intell/status') return respond(res, 200, await refreshCodeIntell())
+        if (url.pathname === '/__desktop/workflow-mode' && req.method === 'GET') {
+          return respond(res, 200, { ...(await readWorkflowPreferences()), defaultMode: 'workflow', auditFile: workflowAuditFile })
+        }
+        if (url.pathname === '/__desktop/workflow-mode/set' && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) return respond(res, 413, { error: 'Request too large' }) }
+          const input = JSON.parse(body)
+          if (!['workflow', 'legacy'].includes(input.mode)) return respond(res, 422, { error: 'mode must be workflow or legacy' })
+          const value = { schemaVersion: 1, mode: input.mode, updatedAt: new Date().toISOString() }
+          await atomicJson(workflowPreferenceFile, value)
+          await auditWorkflowMode({ mode: input.mode, action: 'set-mode', sessionId, outcome: 'allowed' })
+          return respond(res, 200, { ...value, defaultMode: 'workflow', auditFile: workflowAuditFile })
+        }
+        if (url.pathname === '/__desktop/analysis-mode' && req.method === 'GET') {
+          const preferences = await readAnalysisPreferences()
+          const cache = await readAnalysisCache()
+          return respond(res, 200, { ...preferences, cacheEntries: Object.keys(cache.entries).length,
+            guarantee: 'Cache and real requests rank candidates only; current CodeIntell/source evidence is always revalidated.' })
+        }
+        if (url.pathname === '/__desktop/analysis-mode/set' && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 4096) return respond(res, 413, { error: 'Request too large' }) }
+          const input = JSON.parse(body)
+          if (!['strict', 'assisted'].includes(input.mode)) return respond(res, 422, { error: 'mode must be strict or assisted' })
+          await atomicJson(analysisPreferenceFile, { schemaVersion: 1, mode: input.mode, updatedAt: new Date().toISOString() })
+          return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: Object.keys((await readAnalysisCache()).entries).length })
+        }
+        if (url.pathname === '/__desktop/analysis-cache/clear' && req.method === 'POST') {
+          await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: {} })
+          return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: 0 })
+        }
         if (url.pathname === '/__desktop/user-data/status') return respond(res, 200, { ...userDataStatus, projectId: manifest.projectId, buildId: manifest.buildId,
           userRoot, persistence: 'Preserved across upgrades and reinstall unless the application user-data directory is explicitly deleted.' })
         if (url.pathname === '/__desktop/user-data/export') return respond(res, 200, await exportUserData())
@@ -644,9 +823,19 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         if (url.pathname === '/__desktop/profiles') return respond(res, 200, { profiles: await catalog() })
         if (url.pathname === '/__desktop/evidence') return respond(res, 200, { sessionId, revision: state.revision, profileId: state.profileId, requests: evidence.filter(item => item.sessionId === sessionId).slice(-100), pageObservation })
         if (url.pathname === '/__desktop/result') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
+        const legacyWorkflowPaths = new Set(['/__desktop/analyze-target', '/__desktop/create-profile', '/__desktop/apply', '/__desktop/verify'])
+        if (legacyWorkflowPaths.has(url.pathname) && req.method === 'POST') {
+          const internalWorkflow = req.headers['x-dsh-workflow-token'] === workflowToken
+          const preference = await readWorkflowPreferences()
+          if (!internalWorkflow && preference.mode !== 'legacy') {
+            await auditWorkflowMode({ mode: preference.mode, action: url.pathname, sessionId, outcome: 'blocked' })
+            return respond(res, 409, { error: 'Legacy scenario tools are disabled in workflow mode. Use business_start_scenario_workflow or switch explicitly to legacy mode.' })
+          }
+          await auditWorkflowMode({ mode: internalWorkflow ? 'workflow' : 'legacy', action: url.pathname, sessionId, outcome: 'allowed' })
+        }
         if (url.pathname === '/__desktop/analyze-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }
-          try { return respond(res, 200, await analyzeTarget(JSON.parse(body))) } catch (error) { return respond(res, 422, { error: error.message }) }
+          try { return respond(res, 200, await analyzeTarget(JSON.parse(body), sessionId)) } catch (error) { return respond(res, 422, { error: error.message }) }
         }
         if (url.pathname === '/__desktop/state') return respond(res, 200, state)
         if (url.pathname === '/__desktop/result-ui') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
@@ -681,7 +870,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           if (!containsText || !absentText) return respond(res, 422, { error: 'containsText and absentText must be string arrays with at most 20 items' })
           const profile = (await catalog()).find(item => item.id === state.profileId)
           const expectedScenarios = Object.values(profile?.apis || {}).flatMap(value => typeof value === 'string' ? [value] : value.sequence || [value.scenario]).filter(Boolean)
-          const matchedScenarios = new Set(evidence.filter(item => item.sessionId === sessionId && item.profileId === state.profileId).map(item => item.scenarioId))
+          const matchedScenarios = new Set([...evidence, ...(await externalEvidence())]
+            .filter(item => item.sessionId === sessionId && item.profileId === state.profileId).map(item => item.scenarioId))
           const checks = {
             currentProfile: Boolean(state.profileId && profile), observationCurrent: pageObservation?.revision === state.revision && pageObservation?.profileId === state.profileId,
             route: !input.route || pageObservation?.route.includes(input.route),
@@ -779,7 +969,27 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const rollback = JSON.parse(await readFile(rollbackFile, 'utf8'))
           await restoreRollback(rollback)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
-          return respond(res, 200, { operationId, status: 'rolled-back' })
+          const availableProfileIds = new Set((await catalog()).map(profile => profile.id))
+          const resetSessionIds = []
+          for (const [storedSessionId, storedState] of sessionStates) {
+            if (!storedState.profileId || availableProfileIds.has(storedState.profileId)) continue
+            let route = manifest.entryRoute
+            try {
+              const hash = new URL(storedState.url).hash.replace(/^#/, '')
+              if (hash.startsWith('/') && !hash.startsWith('//')) route = hash
+            } catch {}
+            sessionStates.set(storedSessionId, {
+              revision: storedState.revision + 1,
+              profileId: '',
+              url: businessAppUrl(route),
+              verified: false,
+            })
+            pageObservations.delete(storedSessionId)
+            verificationResults.delete(storedSessionId)
+            resetSessionIds.push(storedSessionId)
+          }
+          if (resetSessionIds.length) await persistSessionStates()
+          return respond(res, 200, { operationId, status: 'rolled-back', resetSessionIds })
         }
         if (['/__desktop/apply', '/__desktop/apply-ui'].includes(url.pathname) && req.method === 'POST') {
           let body = ''
@@ -877,7 +1087,12 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const next = require('next')({ dev: false, dir: platform, conf: nextConfig, customServer: true })
   try { await next.prepare(); nextHandler = next.getRequestHandler() } catch (error) { server.close(); throw error }
   return { origin, sourceRoot: source, userRoot, projectId: manifest.projectId, buildId: manifest.buildId,
-    close: async () => { server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close() } }
+    close: async () => {
+      process.off('message', handleWorkflowResponse)
+      for (const pending of workflowRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('Business runtime is stopping')) }
+      workflowRequests.clear()
+      server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close()
+    } }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
