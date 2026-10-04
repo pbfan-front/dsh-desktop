@@ -4,6 +4,94 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'dsh-desktop-business'
 export const inject = ['tools', 'workspaceRegistry', 'webServer']
 
+const WORKFLOW_ROUTES = new Set([
+  '/__desktop/workflow/start-scenario',
+  '/__desktop/workflow/resume',
+  '/__desktop/workflow/get',
+  '/__desktop/workflow/retry',
+  '/__desktop/workflow/cancel'
+])
+
+function limited(values, limit) {
+  return Array.isArray(values) ? values.slice(0, limit) : values
+}
+
+function matchedScenarioIds(analysis, apiUrl) {
+  return new Set([
+    ...(analysis.analysisPlan?.existingScenarioMatches || [])
+      .filter(match => match.apiUrl === apiUrl)
+      .map(match => match.scenarioId),
+    ...(analysis.analysisPlan?.suggestedPlan?.scenarios || [])
+      .filter(scenario => scenario.apiUrl === apiUrl)
+      .map(scenario => scenario.sourceScenarioId)
+  ].filter(Boolean))
+}
+
+function compactScenarios(analysis, api) {
+  if (!Array.isArray(api.scenarios)) return api.scenarios
+  const matched = matchedScenarioIds(analysis, api.apiUrl)
+  const selected = [
+    ...api.scenarios.filter(scenario => matched.has(scenario.id)),
+    ...api.scenarios.filter(scenario => !matched.has(scenario.id))
+  ]
+  return selected.slice(0, 8)
+}
+
+function compactApi(analysis, api) {
+  if (!api || typeof api !== 'object') return api
+  return {
+    ...api,
+    evidence: limited(api.evidence, 4),
+    envelopeFields: limited(api.envelopeFields, 24),
+    fields: limited(api.fields, 40),
+    scenarios: compactScenarios(analysis, api)
+  }
+}
+
+/**
+ * Bound the evidence returned to the Agent without changing the workflow's
+ * persisted analysis. The full run remains available through detail=full.
+ */
+export function compactBusinessAnalysis(analysis) {
+  if (!analysis || typeof analysis !== 'object' || !Array.isArray(analysis.apis)) return analysis
+  const priorityApiUrls = [...new Set([
+    ...(analysis.analysisPlan?.suggestedPlan?.scenarios || []).map(scenario => scenario.apiUrl),
+    ...(analysis.analysisPlan?.existingScenarioMatches || []).map(match => match.apiUrl),
+    ...(analysis.analysisPlan?.focusApiUrls || [])
+  ].filter(Boolean))]
+  const focused = priorityApiUrls
+    .map(apiUrl => analysis.apis.find(api => api?.apiUrl === apiUrl))
+    .filter(Boolean)
+  const selected = (focused.length > 0 ? focused : analysis.apis).slice(0, 6)
+  return {
+    ...analysis,
+    apis: selected.map(api => compactApi(analysis, api)),
+    compaction: {
+      mode: 'summary',
+      totalApiCount: analysis.apis.length,
+      returnedApiCount: selected.length,
+      omittedApiCount: Math.max(0, analysis.apis.length - selected.length),
+      fullEvidenceAvailable: true,
+      fullEvidenceHint: 'Call business_scenario_workflow_status with detail=full only when focused evidence is insufficient or ambiguous.'
+    }
+  }
+}
+
+export function compactBusinessWorkflowRun(run) {
+  if (!run || typeof run !== 'object') return run
+  return {
+    ...run,
+    context: run.context?.analysis
+      ? { ...run.context, analysis: compactBusinessAnalysis(run.context.analysis) }
+      : run.context,
+    steps: Array.isArray(run.steps)
+      ? run.steps.map(step => step.id === 'analyze-target' && step.output
+        ? { ...step, output: compactBusinessAnalysis(step.output) }
+        : step)
+      : run.steps
+  }
+}
+
 export async function apply(ctx) {
   const descriptor = process.env.DSH_BUSINESS_CONNECTION_FILE
   if (!descriptor) return
@@ -45,7 +133,7 @@ export async function apply(ctx) {
     }
   }), 'dsh-desktop-business: preview discovery route')
   const specs = [
-    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. It performs evidence analysis and pauses before any write. Use analysisPlan.focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The complete evidence candidate list remains available in analysis.apis. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
+    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. It performs evidence analysis and pauses before any write. Use analysisPlan.focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The default response contains bounded focused evidence; use business_scenario_workflow_status detail=full only when it is insufficient or ambiguous. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
       routePath: { type: 'string', description: 'Optional exact target business hash route beginning with /. Omit when the intent or current preview should resolve it.' },
       targetPage: { type: 'string', description: 'Optional target business page name or route hint. This takes priority over the current preview page.' },
       query: { type: 'string', required: true, description: 'Business scenario intent used for evidence analysis.' },
@@ -55,8 +143,9 @@ export async function apply(ctx) {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
       checkpointJson: { type: 'string', required: true, description: 'JSON object for the current checkpoint.' }
     }, args => ({ runId: args.runId, checkpointOutput: JSON.parse(args.checkpointJson) })],
-    ['business_scenario_workflow_status', 'Read one stateful scenario workflow timeline, including current checkpoint, completed steps and structured failure.', '/__desktop/workflow/get', {
-      runId: { type: 'string', required: true, description: 'Workflow run ID.' }
+    ['business_scenario_workflow_status', 'Read one stateful scenario workflow timeline, including current checkpoint, completed steps and structured failure. The default summary keeps focused evidence only. Request detail=full only when focused evidence is insufficient or ambiguous; this does not rerun analysis.', '/__desktop/workflow/get', {
+      runId: { type: 'string', required: true, description: 'Workflow run ID.' },
+      detail: { type: 'string', enum: ['summary', 'full'], description: 'Evidence detail. Defaults to summary; full returns the persisted complete candidate set.' }
     }, args => ({ runId: args.runId })],
     ['business_retry_scenario_workflow', 'Retry only the current retryable failed step of a stateful scenario workflow; completed analysis and writes are not replayed.', '/__desktop/workflow/retry', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' }
@@ -123,6 +212,9 @@ export async function apply(ctx) {
         })
         const text = await response.text()
         if (!response.ok) throw new Error(`Business service ${response.status}: ${text}`)
+        if (WORKFLOW_ROUTES.has(route) && !(name === 'business_scenario_workflow_status' && args.detail === 'full')) {
+          try { return JSON.stringify(compactBusinessWorkflowRun(JSON.parse(text))) } catch { return text }
+        }
         return text
       }
     }))

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -42,6 +42,42 @@ describe('business Harness plugin', () => {
         },
         required: ['packageJson'],
       })
+      const statusTool = definitions.find(tool => tool.name === 'business_scenario_workflow_status')
+      expect(statusTool.parameters).toMatchObject({
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          detail: { type: 'string', enum: ['summary', 'full'] },
+        },
+        required: ['runId'],
+      })
+      const analysis = {
+        apis: Array.from({ length: 8 }, (_, index) => ({
+          apiUrl: `/api/${index}.json`,
+          evidence: Array.from({ length: 7 }, (_value, evidenceIndex) => `evidence-${index}-${evidenceIndex}`),
+          fields: Array.from({ length: 50 }, (_value, fieldIndex) => `field-${fieldIndex}`),
+          scenarios: Array.from({ length: 10 }, (_value, scenarioIndex) => ({ id: `scenario-${index}-${scenarioIndex}` })),
+        })),
+        analysisPlan: {
+          focusApiUrls: ['/api/4.json'],
+          existingScenarioMatches: [{ apiUrl: '/api/7.json', scenarioId: 'scenario-7-9' }],
+          suggestedPlan: { scenarios: [{ apiUrl: '/api/7.json', sourceScenarioId: 'scenario-7-9' }] },
+        },
+      }
+      const workflowRun = { id: 'run-1', context: { analysis }, steps: [{ id: 'analyze-target', output: analysis }] }
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(workflowRun)))
+      const summary = JSON.parse(await statusTool.execute({ runId: 'run-1' }, { signal: undefined, agent: { id: 'agent-1' } }))
+      const full = JSON.parse(await statusTool.execute({ runId: 'run-1', detail: 'full' }, { signal: undefined, agent: { id: 'agent-1' } }))
+      expect(summary.context.analysis.apis.map((api: any) => api.apiUrl)).toEqual(['/api/7.json', '/api/4.json'])
+      expect(summary.context.analysis.apis[0].scenarios[0].id).toBe('scenario-7-9')
+      expect(summary.context.analysis.apis[0].evidence).toHaveLength(4)
+      expect(summary.context.analysis.apis[0].fields).toHaveLength(40)
+      expect(summary.context.analysis.compaction.omittedApiCount).toBe(6)
+      expect(full.context.analysis.apis).toHaveLength(8)
+      expect(workflowRun.context.analysis.apis).toHaveLength(8)
+      expect(JSON.parse(fetchMock.mock.calls[0]![1]?.body as string)).toEqual({ runId: 'run-1' })
+      expect(JSON.parse(fetchMock.mock.calls[1]![1]?.body as string)).toEqual({ runId: 'run-1' })
+      fetchMock.mockRestore()
     } finally {
       if (old === undefined) delete process.env.DSH_BUSINESS_CONNECTION_FILE
       else process.env.DSH_BUSINESS_CONNECTION_FILE = old
