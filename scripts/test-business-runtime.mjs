@@ -175,6 +175,9 @@ try {
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.cacheHitCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount > 0)
+  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedSourceIndexBuilds,
+    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedFieldCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedOccurrenceCount > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedSourceScans,

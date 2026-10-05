@@ -706,8 +706,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const accelerationHintsMs = roundDuration(performance.now() - accelerationStartedAt)
     const apis = []
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
-      sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
+      sourceIndexBuildCount: 0, sourceIndexReuseCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
       baselineBuildCount: 0, scenarioDiffCount: 0 }
+    const sharedConsumptionIndexes = new Map()
     const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
     const preparationConcurrency = 8
     const preparationStartedAt = Date.now()
@@ -748,11 +749,19 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       fieldImpactAnalysis.baselineBuildCount += 1
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
       const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
+      const consumerSourceKey = consumerSources.map(item => item.file).sort().join('\u0000')
       const fieldEvidenceCache = new Map()
       let consumptionIndex
       const ensureConsumptionIndex = () => {
         if (consumptionIndex) return consumptionIndex
+        const sharedIndex = sharedConsumptionIndexes.get(consumerSourceKey)
+        if (sharedIndex) {
+          fieldImpactAnalysis.sourceIndexReuseCount += 1
+          consumptionIndex = sharedIndex
+          return consumptionIndex
+        }
         consumptionIndex = fieldConsumptionIndex(consumerSources)
+        sharedConsumptionIndexes.set(consumerSourceKey, consumptionIndex)
         fieldImpactAnalysis.sourceIndexBuildCount += 1
         fieldImpactAnalysis.indexedFieldCount += consumptionIndex.evidenceByField.size
         fieldImpactAnalysis.indexedOccurrenceCount += consumptionIndex.occurrenceCount
@@ -851,6 +860,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       fieldImpactAnalysis: {
         ...fieldImpactAnalysis,
         avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount),
+        avoidedSourceIndexBuilds: fieldImpactAnalysis.sourceIndexReuseCount,
         avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
       candidatePreparation,
