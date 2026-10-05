@@ -179,6 +179,15 @@ try {
   assert.ok(receiveAccountMatch.reasons.includes('field-impact-consumed'))
   assert.equal(receiveAccountAnalysis.analysisPlan.scenarioRanking.strategy, 'intent-source-and-field-impact')
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.strategy, 'bounded-parallel-read')
+  assert.equal(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.strategy, 'lifecycle-derived-callers-with-request-symbol-memo')
+  assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.fileApiEntryCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.apiCallerEntryCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceLookupCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceScanCount
+    <= receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceLookupCount)
+  assert.equal(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.avoidedSourceReferenceScans,
+    receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceLookupCount
+      - receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceScanCount)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.persistence, 'user-root-exact-fingerprint')
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.restoredHits > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.concurrency, 8)

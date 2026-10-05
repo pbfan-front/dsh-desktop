@@ -42,6 +42,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const codeIntellRoot = join(source, '.codeIntell')
   let codeRoutes = []
   let codeIndex = {}
+  let codeIntellDerived = { fileApiEntries: [], apiCallerEntries: [] }
   let codeIntellLifecycleStamp = ''
   let codeIntellStatus = { state: 'unavailable', fresh: false, compatible: false, buildId: null, generatedAt: null,
     coverage: null, lastCheckedAt: null, lastLoadedAt: null, error: 'CodeIntell has not been loaded.' }
@@ -70,6 +71,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!Array.isArray(routes) || !index || typeof index !== 'object' || Array.isArray(index)) throw new Error('CodeIntell artifacts have an incompatible shape')
       codeRoutes = routes
       codeIndex = index
+      codeIntellDerived = {
+        fileApiEntries: Object.entries(index.fileToApis || {}),
+        apiCallerEntries: Object.entries(index.apiCallers || {}).flatMap(([apiUrl, callers]) => (callers || []).flatMap(caller => {
+          const callerId = String(caller)
+          const callerFile = callerId.replace(/^fn:/, '').split('::')[0]
+          const symbol = callerId.split('::').at(-1)
+          return symbol ? [{ apiUrl, callerId, callerFile, callerFileLower: callerFile.toLowerCase(), symbol, symbolLower: symbol.toLowerCase() }] : []
+        }))
+      }
       codeIntellLifecycleStamp = stamp
       codeIntellStatus = { state: 'ready', fresh: true, compatible: true, mode: lifecycle.mode || 'unknown',
         buildId: lifecycle.buildId || manifest.buildId, generatedAt: lifecycle.generatedAt || null,
@@ -656,7 +666,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const interactorPrefix = `src/interactors/${routeSegments.slice(0, 2).join('/')}`
     const apiMap = new Map()
     const relevantFiles = new Set([componentFile])
-    for (const [file, bindings] of Object.entries(codeIndex.fileToApis || {})) {
+    for (const [file, bindings] of codeIntellDerived.fileApiEntries) {
       let baseScore = 0
       if (file === componentFile) baseScore = 120
       else if (file.startsWith(`${componentDir}/`)) baseScore = 100
@@ -678,25 +688,28 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       try { relevantSource.push({ file, text: await readFile(join(source, file), 'utf8') }) } catch {}
     }
     const sourceReadMs = roundDuration(performance.now() - sourceReadStartedAt)
-    for (const [apiUrl, callers] of Object.entries(codeIndex.apiCallers || {})) {
-      for (const caller of callers || []) {
-        const callerId = String(caller)
-        const callerFile = callerId.replace(/^fn:/, '').split('::')[0]
-        const symbol = callerId.split('::').at(-1)
-        if (!symbol) continue
-        const reference = relevantSource.find(item => item.text.includes(symbol))
-        const routeDomain = routeSegments[0]?.toLowerCase() || ''
-        const sameDataServerDomain = Boolean(routeDomain) && callerFile.toLowerCase().startsWith(`src/dataserver/${routeDomain}/`)
-        if (!reference && !sameDataServerDomain) continue
-        const current = apiMap.get(apiUrl)
-        const evidenceItem = reference
-          ? { file: reference.file, via: callerId, source: 'codeIntell.apiCallers+sourceSymbol' }
-          : { file: callerFile, via: callerId, source: 'codeIntell.apiCallers+routeDomain' }
-        const routeSymbolScore = routeToken && symbol.toLowerCase().includes(routeToken) ? 100 : 0
-        const callerScore = (reference ? 110 : 60) + routeSymbolScore + queryScore(`${apiUrl} ${callerId}`)
-        if (!current) apiMap.set(apiUrl, { apiUrl, score: callerScore, evidence: [evidenceItem] })
-        else if (current.evidence.length < 5) { current.score = Math.max(current.score, callerScore); current.evidence.push(evidenceItem) }
+    const sourceReferenceBySymbol = new Map()
+    let sourceReferenceLookupCount = 0
+    let sourceReferenceScanCount = 0
+    const routeDomain = routeSegments[0]?.toLowerCase() || ''
+    const dataServerDomainPrefix = routeDomain ? `src/dataserver/${routeDomain}/` : ''
+    for (const caller of codeIntellDerived.apiCallerEntries) {
+      sourceReferenceLookupCount += 1
+      if (!sourceReferenceBySymbol.has(caller.symbol)) {
+        sourceReferenceScanCount += 1
+        sourceReferenceBySymbol.set(caller.symbol, relevantSource.find(item => item.text.includes(caller.symbol)))
       }
+      const reference = sourceReferenceBySymbol.get(caller.symbol)
+      const sameDataServerDomain = Boolean(dataServerDomainPrefix) && caller.callerFileLower.startsWith(dataServerDomainPrefix)
+      if (!reference && !sameDataServerDomain) continue
+      const current = apiMap.get(caller.apiUrl)
+      const evidenceItem = reference
+        ? { file: reference.file, via: caller.callerId, source: 'codeIntell.apiCallers+sourceSymbol' }
+        : { file: caller.callerFile, via: caller.callerId, source: 'codeIntell.apiCallers+routeDomain' }
+      const routeSymbolScore = routeToken && caller.symbolLower.includes(routeToken) ? 100 : 0
+      const callerScore = (reference ? 110 : 60) + routeSymbolScore + queryScore(`${caller.apiUrl} ${caller.callerId}`)
+      if (!current) apiMap.set(caller.apiUrl, { apiUrl: caller.apiUrl, score: callerScore, evidence: [evidenceItem] })
+      else if (current.evidence.length < 5) { current.score = Math.max(current.score, callerScore); current.evidence.push(evidenceItem) }
     }
     // Some legacy dataServer modules pass enum members such as
     // `apiConfig.queryReceiptList` to fetch(). The index deliberately avoids
@@ -704,7 +717,6 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     // whose symbol is named by this route (or by already relevant source).
     // The URL still comes from checked-in source and must have an existing mock
     // below before it can become creation evidence.
-    const routeDomain = routeSegments[0]?.toLowerCase() || ''
     const domainApiConfig = `src/dataServer/${routeDomain}/apiconfig.ts`
     try {
       const configText = await readFile(join(source, domainApiConfig), 'utf8')
@@ -944,6 +956,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
       candidatePreparation,
+      evidenceDiscoveryIndex: {
+        strategy: 'lifecycle-derived-callers-with-request-symbol-memo',
+        fileApiEntryCount: codeIntellDerived.fileApiEntries.length,
+        apiCallerEntryCount: codeIntellDerived.apiCallerEntries.length,
+        sourceReferenceLookupCount,
+        sourceReferenceScanCount,
+        avoidedSourceReferenceScans: Math.max(0, sourceReferenceLookupCount - sourceReferenceScanCount)
+      },
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length
         ? 'Review the matched existing scenarios before proposing new Mock data. Keep all writes behind the workflow checkpoint.'
