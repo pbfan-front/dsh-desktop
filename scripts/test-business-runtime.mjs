@@ -120,10 +120,13 @@ try {
   assert.equal(receiptAnalysis.acceleration.mode, 'assisted')
   assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
   assert.equal(receiptAnalysis.analysisReuse.reused, false)
+  assert.equal(receiptAnalysis.analysisTimings.reused, false)
   const reusedReceiptAnalysis = await (await get('/__desktop/analyze-target', {
     method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
   })).json()
   assert.equal(reusedReceiptAnalysis.analysisReuse.reused, true, JSON.stringify(reusedReceiptAnalysis.analysisReuse))
+  assert.equal(reusedReceiptAnalysis.analysisTimings.reused, true)
+  assert.ok(reusedReceiptAnalysis.analysisTimings.totalMs >= 0)
   assert.equal(reusedReceiptAnalysis.analysisReuse.scope, 'same-session-exact-input')
   assert.notEqual(reusedReceiptAnalysis.evidenceId, receiptAnalysis.evidenceId)
   assert.deepEqual(reusedReceiptAnalysis.analysisPlan, receiptAnalysis.analysisPlan)
@@ -137,6 +140,15 @@ try {
   }) })
   const receiveAccountAnalysis = await receiveAccountAnalysisResponse.json()
   assert.equal(receiveAccountAnalysisResponse.status, 200, JSON.stringify(receiveAccountAnalysis))
+  assert.equal(receiveAccountAnalysis.analysisTimings.reused, false)
+  for (const phase of ['codeIntellRefreshMs', 'preferencesAndReuseLookupMs', 'evidenceDiscoveryMs', 'sourceReadMs',
+    'accelerationHintsMs', 'candidatePreparationMs', 'scenarioFieldAnalysisMs', 'rankingAndQualityMs', 'persistenceMs', 'totalMs']) {
+    assert.ok(Number.isFinite(receiveAccountAnalysis.analysisTimings[phase]))
+    assert.ok(receiveAccountAnalysis.analysisTimings[phase] >= 0)
+  }
+  assert.ok(receiveAccountAnalysis.analysisTimings.totalMs >= receiveAccountAnalysis.analysisTimings.candidatePreparationMs)
+  assert.ok(receiveAccountAnalysis.analysisTimings.counts.relevantSourceFiles > 0)
+  assert.ok(receiveAccountAnalysis.analysisTimings.counts.evidenceApiCandidates >= receiveAccountAnalysis.analysisTimings.counts.rankedApis)
   assert.equal(receiveAccountAnalysis.analysisPlan.confidence, 'medium', JSON.stringify(receiveAccountAnalysis.analysisPlan))
   assert.ok(receiveAccountAnalysis.analysisPlan.existingScenarioMatches.some(item => item.scenarioId === '失败返回'), JSON.stringify(receiveAccountAnalysis.analysisPlan))
   const receiveAccountMatch = receiveAccountAnalysis.analysisPlan.existingScenarioMatches.find(item => item.scenarioId === '失败返回')

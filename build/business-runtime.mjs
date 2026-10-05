@@ -519,7 +519,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     throw targetResolutionError('E_TARGET_ROUTE_REQUIRED', 'The business intent does not identify one page and no valid current preview is available. Provide routePath or targetPage.')
   }
   const analyzeTarget = async (input, sessionId = 'default') => {
+    const analysisStartedAt = performance.now()
+    const roundDuration = value => Math.round(value * 100) / 100
+    const codeIntellRefreshStartedAt = performance.now()
     await refreshCodeIntell()
+    const codeIntellRefreshMs = roundDuration(performance.now() - codeIntellRefreshStartedAt)
     if (codeIntellStatus.state !== 'ready') throw new Error(`CodeIntell unavailable: ${codeIntellStatus.error}`)
     const routePath = String(input?.routePath || '').trim()
     const query = String(input?.query || '').trim().toLowerCase()
@@ -528,6 +532,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       queryTerms.reduce((score, term) => score + (String(text).toLowerCase().includes(term) ? points : 0), 0))
     if (!safeRoute(routePath)) throw new Error('routePath must be a safe absolute business route')
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
+    const preferencesStartedAt = performance.now()
     const preferences = await readAnalysisPreferences()
     const reuseKey = contentHash({
       sessionId,
@@ -539,6 +544,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       explicitApis: [...explicitApis].filter(value => typeof value === 'string').sort()
     })
     const reusable = preferences.sessionReuse ? sessionAnalysisReuse.get(reuseKey) : undefined
+    const preferencesAndReuseLookupMs = roundDuration(performance.now() - preferencesStartedAt)
     if (reusable && reusable.expiresAt > Date.now()) {
       const evidenceId = randomUUID()
       const expiresAtMs = Date.now() + 30 * 60_000
@@ -557,10 +563,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           scope: 'same-session-exact-input',
           originalAnalyzedAt: reusable.analyzedAt,
           sourceRevalidated: true
+        },
+        analysisTimings: {
+          reused: true,
+          codeIntellRefreshMs,
+          preferencesAndReuseLookupMs,
+          totalMs: roundDuration(performance.now() - analysisStartedAt)
         }
       }
     }
     if (reusable) sessionAnalysisReuse.delete(reuseKey)
+    const evidenceDiscoveryStartedAt = performance.now()
     const routeCandidates = codeRoutes
       .map(route => ({ ...route, score: route.path === routePath ? 100 : route.path.includes(routePath) || routePath.includes(route.path) ? 40 : 0 }))
       .filter(route => route.score > 0)
@@ -592,9 +605,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       }
     }
     const relevantSource = []
+    const sourceReadStartedAt = performance.now()
     for (const file of relevantFiles) {
       try { relevantSource.push({ file, text: await readFile(join(source, file), 'utf8') }) } catch {}
     }
+    const sourceReadMs = roundDuration(performance.now() - sourceReadStartedAt)
     for (const [apiUrl, callers] of Object.entries(codeIndex.apiCallers || {})) {
       for (const caller of callers || []) {
         const callerId = String(caller)
@@ -656,6 +671,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       ].join(' '))
       apiMap.get(apiUrl).score += 160
     }
+    const evidenceDiscoveryMs = roundDuration(performance.now() - evidenceDiscoveryStartedAt)
+    const accelerationStartedAt = performance.now()
     const acceleration = {
       mode: preferences.mode,
       usedCache: false,
@@ -686,6 +703,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       acceleration.usedRecentRequests = recentApis.some(apiUrl => apiMap.has(apiUrl))
       if (!acceleration.usedCache && !acceleration.usedRecentRequests) acceleration.fallback = 'no-valid-hints'
     }
+    const accelerationHintsMs = roundDuration(performance.now() - accelerationStartedAt)
     const apis = []
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
       sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
@@ -715,6 +733,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       batchCount: Math.ceil(rankedCandidates.length / preparationConcurrency),
       durationMs: Date.now() - preparationStartedAt
     }
+    const scenarioAnalysisStartedAt = performance.now()
     for (const { candidate, relativePath, existing, generated, config } of preparedCandidates) {
       const scenarios = scenarioArray(config)
       const template = config.baseData || scenarios[0]?.data || {}
@@ -766,6 +785,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     apis.sort((a, b) => b.score - a.score)
     apis.splice(20)
     if (!apis.length) throw new Error(`CodeIntell found no existing API mocks for ${route.path}`)
+    const scenarioFieldAnalysisMs = roundDuration(performance.now() - scenarioAnalysisStartedAt)
+    const rankingStartedAt = performance.now()
     const normalizedQuery = normalizedHint(input.query)
     const scenarioIntentMatch = scenario => {
       const labels = [...new Set([scenario.label, scenario.id].map(normalizedHint).filter(Boolean))]
@@ -921,6 +942,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         }]
       }
     }
+    const rankingAndQualityMs = roundDuration(performance.now() - rankingStartedAt)
+    const persistenceStartedAt = performance.now()
     const evidenceId = randomUUID()
     const analyzedAt = new Date().toISOString()
     const expiresAtMs = Date.now() + 30 * 60_000
@@ -952,6 +975,27 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
         .slice(0, 100)
       await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: Object.fromEntries(entries) })
+    }
+    result.analysisTimings = {
+      reused: false,
+      codeIntellRefreshMs,
+      preferencesAndReuseLookupMs,
+      evidenceDiscoveryMs,
+      sourceReadMs,
+      accelerationHintsMs,
+      candidatePreparationMs: candidatePreparation.durationMs,
+      scenarioFieldAnalysisMs,
+      rankingAndQualityMs,
+      persistenceMs: roundDuration(performance.now() - persistenceStartedAt),
+      totalMs: roundDuration(performance.now() - analysisStartedAt),
+      counts: {
+        routeCandidates: routeCandidates.length,
+        relevantSourceFiles: relevantSource.length,
+        evidenceApiCandidates: apiMap.size,
+        preparedMockCandidates: preparedCandidates.length,
+        rankedApis: apis.length,
+        matchedScenarios: existingScenarioMatches.length
+      }
     }
     return result
   }
