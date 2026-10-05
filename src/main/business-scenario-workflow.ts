@@ -33,24 +33,30 @@ export function registerBusinessScenarioWorkflow(options: {
   pluginId: string
   requestBusiness: RequestBusiness
   definition?: BusinessPluginWorkflowDeclaration
+  nowMs?: () => number
 }): (input: BusinessScenarioWorkflowStartInput) => Promise<BusinessWorkflowRun> {
   const definition = scenarioDefinition(options.definition)
+  const nowMs = options.nowMs ?? (() => performance.now())
   options.runtime.registerWorkflow(definition, {
     'analyze-target': async ({ context }) => {
       const input = parseStartInput(context)
+      const resolveStartedAt = nowMs()
       const target = await options.requestBusiness('/__desktop/resolve-target', {
         ...(input.routePath ? { routePath: input.routePath } : {}),
         ...(input.targetPage ? { targetPage: input.targetPage } : {}),
         query: input.query
       }, input.sessionId) as BusinessScenarioWorkflowTarget
+      const resolveTargetMs = Math.max(0, nowMs() - resolveStartedAt)
+      const analyzeStartedAt = nowMs()
       const analysis = await options.requestBusiness('/__desktop/analyze-target', {
         routePath: target.routePath,
         query: input.query,
         apiUrls: input.apiUrls ?? []
       }, input.sessionId)
+      const analyzeTargetMs = Math.max(0, nowMs() - analyzeStartedAt)
       return {
         output: analysis,
-        contextPatch: { analysis, target }
+        contextPatch: { analysis, target, requestTimings: { resolveTargetMs, analyzeTargetMs } }
       }
     },
     'create-profile': async ({ context, previousOutput }) => {

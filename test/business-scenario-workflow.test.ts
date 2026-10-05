@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { registerBusinessScenarioWorkflow } from '../src/main/business-scenario-workflow'
+import { summarizeBusinessScenarioTiming } from '../src/main/business-scenario-timing'
 import { BusinessWorkflowRuntime } from '../src/main/business-workflow-runtime'
 
 const startInput = {
@@ -32,6 +33,46 @@ const verification = {
 }
 
 describe('business scenario workflow', () => {
+  it('separates request work from plan and preview waiting in persisted runs', async () => {
+    let wallMs = 0
+    let monotonicMs = 0
+    const runtime = new BusinessWorkflowRuntime({
+      idFactory: () => 'run-timing',
+      now: () => new Date(Date.UTC(2026, 9, 5) + wallMs)
+    })
+    const requestBusiness = vi.fn(async (path: string) => {
+      const delay = path === '/__desktop/resolve-target' ? 20 : path === '/__desktop/analyze-target' ? 80 : 10
+      wallMs += delay
+      monotonicMs += delay
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1' }
+      if (path === '/__desktop/verify') return { verified: true, checks: {
+        currentProfile: true, observationCurrent: true, route: true,
+        containsText: [{ text: '核额失败', passed: true }],
+        absentText: [{ text: '系统繁忙', passed: true }],
+        scenarios: [{ scenarioId: 'quota_fail', passed: true }]
+      } }
+      return { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness, nowMs: () => monotonicMs })
+    const analyzed = await start(startInput)
+    expect(summarizeBusinessScenarioTiming(analyzed)?.phases).toMatchObject({ resolveTargetMs: 20, analyzeTargetMs: 80 })
+    expect(summarizeBusinessScenarioTiming(analyzed)?.phases.confirmPlanWaitMs).toBeUndefined()
+
+    wallMs += 5000
+    const applied = await runtime.resume(analyzed.id, plan)
+    wallMs += 2000
+    const completed = await runtime.resume(applied.id, verification)
+    const summary = summarizeBusinessScenarioTiming(completed)
+    expect(summary).toMatchObject({ status: 'completed', elapsedMs: 7130, activeMs: 130, checkpointWaitMs: 7000 })
+    expect(summary?.phases).toMatchObject({
+      resolveTargetMs: 20, analyzeTargetMs: 80, confirmPlanWaitMs: 5000,
+      createProfileMs: 10, applyProfileMs: 10, previewWaitMs: 2000, verifyPreviewMs: 10
+    })
+    expect(summarizeBusinessScenarioTiming(JSON.parse(JSON.stringify(completed)))).toEqual(summary)
+    expect(summarizeBusinessScenarioTiming({ ...completed, workflowId: 'other-workflow' })).toBeUndefined()
+  })
+
   it('connects analysis, confirmed creation, apply and page verification in order', async () => {
     let sequence = 0
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => `run-${++sequence}` })

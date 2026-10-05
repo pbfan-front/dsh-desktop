@@ -4,6 +4,7 @@ import { registerBusinessWorkflowHandlers } from './business-workflow-ipc'
 import { createPersistentBusinessWorkflowRuntime } from './business-workflow-store'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import { BUSINESS_SCENARIO_WORKFLOW_ID, registerBusinessScenarioWorkflow } from './business-scenario-workflow'
+import { summarizeBusinessScenarioTiming } from './business-scenario-timing'
 import { parseBusinessPluginWorkflows } from './business-plugin-contract'
 import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
 import { ensureBusinessWorkspace } from './business-workspace'
@@ -3506,6 +3507,10 @@ async function bootstrap(): Promise<void> {
     storagePath: join(businessDataRoot, 'workflow-runs.json'),
     runtime: {
       onRunChanged: (run) => {
+        if (run.status === 'waiting_for_user' || run.status === 'completed' || run.status === 'failed') {
+          const timing = summarizeBusinessScenarioTiming(run)
+          if (timing) console.info(`[business-workflow] timing run=${run.id} ${JSON.stringify(timing)}`)
+        }
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('business-workflow:changed', run)
         }
