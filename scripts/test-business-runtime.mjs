@@ -144,6 +144,15 @@ try {
   assert.ok(receiveAccountMatch.consumedFieldCount > 0)
   assert.ok(receiveAccountMatch.reasons.includes('field-impact-consumed'))
   assert.equal(receiveAccountAnalysis.analysisPlan.scenarioRanking.strategy, 'intent-source-and-field-impact')
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.strategy, 'bounded-parallel-read')
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.concurrency, 8)
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.preparedCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.preparedCount
+    <= receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount)
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.batchCount,
+    Math.ceil(receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount / 8))
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.durationMs >= 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.strategy, 'single-pass-per-api-field-index')
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.cacheHitCount > 0)

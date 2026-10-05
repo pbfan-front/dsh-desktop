@@ -690,15 +690,32 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
       sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
       baselineBuildCount: 0, scenarioDiffCount: 0 }
-    for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
-      let relativePath
-      try { relativePath = apiMockRelative(candidate.apiUrl) } catch { continue }
-      const existing = await readMockConfig(relativePath)
-      let generated
-      if (!existing) {
-        try { generated = await generatedMockConfig(candidate.apiUrl, relativePath) } catch { continue }
-      }
-      const config = existing?.config || generated.config
+    const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
+    const preparationConcurrency = 8
+    const preparationStartedAt = Date.now()
+    const preparedCandidates = []
+    for (let index = 0; index < rankedCandidates.length; index += preparationConcurrency) {
+      const preparedBatch = await Promise.all(rankedCandidates.slice(index, index + preparationConcurrency).map(async candidate => {
+        let relativePath
+        try { relativePath = apiMockRelative(candidate.apiUrl) } catch { return undefined }
+        const existing = await readMockConfig(relativePath)
+        let generated
+        if (!existing) {
+          try { generated = await generatedMockConfig(candidate.apiUrl, relativePath) } catch { return undefined }
+        }
+        return { candidate, relativePath, existing, generated, config: existing?.config || generated.config }
+      }))
+      preparedCandidates.push(...preparedBatch.filter(Boolean))
+    }
+    const candidatePreparation = {
+      strategy: 'bounded-parallel-read',
+      concurrency: preparationConcurrency,
+      candidateCount: rankedCandidates.length,
+      preparedCount: preparedCandidates.length,
+      batchCount: Math.ceil(rankedCandidates.length / preparationConcurrency),
+      durationMs: Date.now() - preparationStartedAt
+    }
+    for (const { candidate, relativePath, existing, generated, config } of preparedCandidates) {
       const scenarios = scenarioArray(config)
       const template = config.baseData || scenarios[0]?.data || {}
       const baseLeafFields = payloadLeafFields(template)
@@ -811,6 +828,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount),
         avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
+      candidatePreparation,
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length
         ? 'Review the matched existing scenarios before proposing new Mock data. Keep all writes behind the workflow checkpoint.'
