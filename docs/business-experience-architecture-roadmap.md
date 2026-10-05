@@ -357,6 +357,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-05 | 完成 BEA-038 候选时间排序诊断与优化 | 三次计时定位首次排序的约 5.15–5.39ms 由 `localeCompare` 初始化产生；Runtime 生成的 ISO 时间改用字符串顺序比较后约 0.02ms，首次复杂分析持久化阶段约 5.2ms 降至 0.07–0.09ms |
 | 2026-10-05 | 完成 BEA-039 工作流端到端分段计时 | `analyze-target` 上报 `context.requestTimings.resolveTargetMs/analyzeTargetMs`；其余阶段从持久化步骤时间戳汇总。受控回归验证总计 7130ms 中执行 130ms、人工/预览 Checkpoint 等待 7000ms；真实 GUI 样本待采集，不能据此宣称生产提速 |
 | 2026-10-05 | BEA-039 开发进程实测第一段 | 重启 `dev:business` 后经真实业务运行时与 Desktop 工作流桥启动 `/repay/receiptList` 分析，run `44b46731-d6a0-4adb-ac74-d1655fc3799c`：目标解析 5.65ms、业务分析 23.95ms、`analyze-target` 35ms，启动至 `confirm-plan` 66ms；采样后取消，未写 Mock。此数据不包含 DSH 对话推理、方案准备或预览验证，不能视为用户侧完整耗时 |
+| 2026-10-05 | BEA-039 Desktop 对话采样 | 在新会话中仅请求启动 `/repay/receiptList` 工作流并停在 `confirm-plan`，界面显示本轮用时约 9 秒；run `76b29888-bbc8-4f1d-805a-36ec7dfd3252` 的工作流启动至检查点 105ms、目标解析 3.29ms、分析请求 24.56ms、分析引擎内部 20.31ms。两者口径不同，差额包含 Agent 推理、工具调度和回答生成，不能仅归因于单项；运行随后取消，无 Mock 写入。仍需测完整方案/预览流程 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |
