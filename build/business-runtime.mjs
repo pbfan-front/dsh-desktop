@@ -747,8 +747,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     const existingScenarioMatches = apis.flatMap(api => api.scenarios.flatMap(scenario => {
       const match = scenarioIntentMatch(scenario)
-      return match ? [{ apiUrl: api.apiUrl, scenarioId: scenario.id, label: scenario.label, score: api.score + match.score,
-        matchScore: match.score, reasons: match.reasons }] : []
+      if (!match) return []
+      const consumedFieldCount = scenario.fieldImpact?.consumedFields?.length || 0
+      const impactCoverage = Number(scenario.fieldImpact?.coverage || 0)
+      const impactScore = consumedFieldCount ? Math.min(50, 20 + consumedFieldCount * 5 + Math.round(impactCoverage * 20)) : 0
+      return [{ apiUrl: api.apiUrl, scenarioId: scenario.id, label: scenario.label,
+        score: api.score + match.score + impactScore,
+        matchScore: match.score,
+        impactScore,
+        impactCoverage,
+        consumedFieldCount,
+        reasons: [...match.reasons, ...(impactScore ? ['field-impact-consumed'] : [])] }]
     })).sort((left, right) => right.score - left.score).slice(0, 12)
     const matchedApiUrls = [...new Set(existingScenarioMatches.map(item => item.apiUrl))]
     const confidentExistingMatch = (existingScenarioMatches[0]?.matchScore || 0) >= 120
@@ -762,6 +771,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       alternativeApiUrls: apis.map(api => api.apiUrl).filter(apiUrl => !focusApiUrls.includes(apiUrl)),
       existingScenarioMatches,
       evidenceCandidateCount: apis.length,
+      scenarioRanking: {
+        strategy: 'intent-source-and-field-impact',
+        fieldImpactMaxBonus: 50,
+        note: 'Field consumption evidence improves ranking but never replaces intent matching or final iframe verification.'
+      },
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length
         ? 'Review the matched existing scenarios before proposing new Mock data. Keep all writes behind the workflow checkpoint.'
