@@ -1160,16 +1160,24 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       acceleration,
       analysisReuse: { enabled: preferences.sessionReuse, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
     }
+    const resultPreparedAt = performance.now()
     const evidenceRecord = { routePath: route.path,
       apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
       expiresAt: expiresAtMs }
     analysisEvidence.set(evidenceId, evidenceRecord)
+    const evidenceStoredAt = performance.now()
     if (preferences.sessionReuse) {
       sessionAnalysisReuse.set(reuseKey, { result, evidence: evidenceRecord, expiresAt: Date.now() + 5 * 60_000, analyzedAt })
       while (sessionAnalysisReuse.size > 50) sessionAnalysisReuse.delete(sessionAnalysisReuse.keys().next().value)
     }
+    const reuseStoredAt = performance.now()
+    let hintReadMs = 0
+    let hintSortMs = 0
+    let hintScheduleMs = 0
     if (preferences.mode === 'assisted' && acceleration.cacheKey) {
+      const hintReadStartedAt = performance.now()
       const cache = await readAnalysisCache()
+      hintReadMs = roundDuration(performance.now() - hintReadStartedAt)
       cache.entries[acceleration.cacheKey] = {
         sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
         routePath: route.path,
@@ -1177,14 +1185,24 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         apiUrls: apis.slice(0, 12).map(api => api.apiUrl),
         updatedAt: new Date().toISOString()
       }
+      const hintSortStartedAt = performance.now()
       const entries = Object.entries(cache.entries)
-        .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
+        .sort((left, right) => {
+          const newer = String(right[1].updatedAt)
+          const older = String(left[1].updatedAt)
+          return newer < older ? -1 : newer > older ? 1 : 0
+        })
         .slice(0, 100)
       cache.entries = Object.fromEntries(entries)
+      const hintSortedAt = performance.now()
+      hintSortMs = roundDuration(hintSortedAt - hintSortStartedAt)
       analysisCacheDirty = true
       scheduleAnalysisCachePersistence()
+      hintScheduleMs = roundDuration(performance.now() - hintSortedAt)
     }
+    const hintUpdatedAt = performance.now()
     scheduleMockConfigCachePersistence()
+    const mockScheduledAt = performance.now()
     result.analysisTimings = {
       reused: false,
       codeIntellRefreshMs,
@@ -1196,6 +1214,16 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       scenarioFieldAnalysisMs,
       rankingAndQualityMs,
       persistenceMs: roundDuration(performance.now() - persistenceStartedAt),
+      persistencePhases: {
+        resultAssemblyMs: roundDuration(resultPreparedAt - persistenceStartedAt),
+        evidenceStoreMs: roundDuration(evidenceStoredAt - resultPreparedAt),
+        reuseStoreMs: roundDuration(reuseStoredAt - evidenceStoredAt),
+        assistedHintUpdateMs: roundDuration(hintUpdatedAt - reuseStoredAt),
+        assistedHintReadMs: hintReadMs,
+        assistedHintSortMs: hintSortMs,
+        assistedHintScheduleMs: hintScheduleMs,
+        mockCacheScheduleMs: roundDuration(mockScheduledAt - hintUpdatedAt)
+      },
       totalMs: roundDuration(performance.now() - analysisStartedAt),
       counts: {
         routeCandidates: routeCandidates.length,

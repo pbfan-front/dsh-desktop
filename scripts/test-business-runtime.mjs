@@ -169,6 +169,9 @@ try {
     assert.ok(receiveAccountAnalysis.analysisTimings[phase] >= 0)
   }
   assert.ok(receiveAccountAnalysis.analysisTimings.totalMs >= receiveAccountAnalysis.analysisTimings.candidatePreparationMs)
+  for (const value of Object.values(receiveAccountAnalysis.analysisTimings.persistencePhases)) {
+    assert.ok(Number.isFinite(value) && value >= 0)
+  }
   assert.ok(receiveAccountAnalysis.analysisTimings.counts.relevantSourceFiles > 0)
   assert.ok(receiveAccountAnalysis.analysisTimings.counts.evidenceApiCandidates >= receiveAccountAnalysis.analysisTimings.counts.rankedApis)
   assert.equal(receiveAccountAnalysis.analysisPlan.confidence, 'medium', JSON.stringify(receiveAccountAnalysis.analysisPlan))
