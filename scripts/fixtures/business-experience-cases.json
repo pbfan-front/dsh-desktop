@@ -1,0 +1,13 @@
+[
+  {
+    "id": "receipt-normal",
+    "intent": "借据列表正常展示",
+    "routePath": "/repay/receiptList",
+    "apiUrl": "/loanNbr/loanNbr.json",
+    "mockFields": [
+      { "path": ["data", "list", 0, "duestatus"], "equals": "0" }
+    ],
+    "visibleText": ["借据列表"],
+    "absentText": ["系统繁忙", "逾期"]
+  }
+]
