@@ -36,10 +36,15 @@ export interface BusinessWorkflowGateContext extends BusinessWorkflowStepContext
 export type BusinessWorkflowGate = (context: BusinessWorkflowGateContext) => Promise<void> | void
 export type BusinessWorkflowGates = Record<string, BusinessWorkflowGate>
 
+export type BusinessWorkflowCheckpointValidator = (
+  context: BusinessWorkflowStepContext & { checkpointOutput: unknown }
+) => Promise<void> | void
+
 interface RegisteredWorkflow {
   definition: BusinessWorkflowDefinition
   handlers: BusinessWorkflowHandlers
   gates: BusinessWorkflowGates
+  checkpointValidators: Record<string, BusinessWorkflowCheckpointValidator>
   pluginId?: string
   compatibleRunVersions: Set<string>
 }
@@ -47,6 +52,7 @@ interface RegisteredWorkflow {
 export interface BusinessWorkflowRegistrationOptions {
   pluginId?: string
   compatibleRunVersions?: string[]
+  checkpointValidators?: Record<string, BusinessWorkflowCheckpointValidator>
 }
 
 export interface BusinessWorkflowRuntimeOptions {
@@ -94,11 +100,17 @@ export class BusinessWorkflowRuntime {
     for (const gateId of Object.keys(gates)) {
       if (!requiredGates.has(gateId)) throw new Error(`Workflow gate is not declared: ${definition.id}/${gateId}`)
     }
+    for (const stepId of Object.keys(options.checkpointValidators ?? {})) {
+      if (!definition.steps.some(step => step.id === stepId && step.type === 'checkpoint')) {
+        throw new Error(`Workflow checkpoint validator has no matching checkpoint: ${definition.id}/${stepId}`)
+      }
+    }
     if (options.pluginId !== undefined && !safeId.test(options.pluginId)) throw new Error('Workflow registration pluginId is unsafe.')
     const compatibleRunVersions = new Set(options.compatibleRunVersions ?? [])
     compatibleRunVersions.delete(definition.version)
     this.workflows.set(definition.id, {
       definition: clone(definition), handlers: { ...handlers }, gates: { ...gates },
+      checkpointValidators: { ...options.checkpointValidators },
       pluginId: options.pluginId, compatibleRunVersions
     })
   }
@@ -162,6 +174,17 @@ export class BusinessWorkflowRuntime {
     const step = run.steps.find((candidate) => candidate.id === run.currentStepId)
     if (!step || step.type !== 'checkpoint' || step.status !== 'running') {
       throw new Error(`Workflow checkpoint state is inconsistent: ${runId}`)
+    }
+    const workflow = this.requireWorkflow(run.workflowId)
+    const validator = workflow.checkpointValidators[step.id]
+    if (validator) {
+      const definition = workflow.definition.steps.find(candidate => candidate.id === step.id)!
+      const previousStep = run.steps[run.steps.indexOf(step) - 1]
+      await validator({
+        runId: run.id, workflowId: run.workflowId, pluginId: run.pluginId,
+        step: clone(definition), context: clone(run.context),
+        previousOutput: clone(previousStep?.output), checkpointOutput: clone(checkpointOutput)
+      })
     }
     step.output = clone(checkpointOutput)
     step.status = 'completed'

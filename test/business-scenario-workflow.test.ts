@@ -213,6 +213,58 @@ describe('business scenario workflow', () => {
     expect(requestBusiness).toHaveBeenCalledTimes(2)
   })
 
+  it('blocks a business-authored semantic mismatch before creating a Profile', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-semantic' })
+    const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target'
+      ? { ...resolvedTarget, routePath: '/repay/receiptList' }
+      : { evidenceId: 'evidence-1' })
+    const start = registerBusinessScenarioWorkflow({
+      runtime, pluginId: 'com.dataelement.demo-test', requestBusiness,
+      semanticRules: [{
+        id: 'receipt-normal-status', routePath: '/repay/receiptList', intentEquals: '借据列表正常展示',
+        apiUrl: '/loanNbr/loanNbr.json',
+        fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
+        sourceScenarioIds: ['正常借据可以提前结清']
+      }]
+    })
+    const analyzed = await start({ routePath: '/repay/receiptList', query: '借据列表正常展示' })
+    expect(analyzed.context.semanticExpectations).toHaveLength(1)
+    const badPlan = { ...plan, scenarios: [{ id: 'overdue', apiUrl: '/loanNbr/loanNbr.json', data: { data: { list: [{ duestatus: '1' }] } } }] }
+    await expect(runtime.resume(analyzed.id, badPlan)).rejects.toMatchObject({ code: 'WORKFLOW_SEMANTIC_MISMATCH' })
+    const waiting = runtime.getRun(analyzed.id)
+    expect(waiting?.status).toBe('waiting_for_user')
+    expect(waiting?.currentStepId).toBe('confirm-plan')
+    expect(waiting?.steps[1]?.status).toBe('running')
+    expect(requestBusiness).toHaveBeenCalledTimes(2)
+    const correctedPlan = { ...badPlan, scenarios: [{ ...badPlan.scenarios[0], data: { data: { list: [{ duestatus: '0' }] } } }] }
+    expect((await runtime.resume(analyzed.id, correctedPlan)).status).toBe('waiting_for_user')
+    expect(requestBusiness).toHaveBeenCalledTimes(4)
+  })
+
+  it('accepts a matching direct payload or explicitly approved source Scenario', async () => {
+    let runId = 0
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => `run-semantic-${++runId}` })
+    const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target'
+      ? { ...resolvedTarget, routePath: '/repay/receiptList' }
+      : { evidenceId: 'evidence-1' })
+    const start = registerBusinessScenarioWorkflow({
+      runtime, pluginId: 'com.dataelement.demo-test', requestBusiness,
+      semanticRules: [{
+        id: 'receipt-normal-status', routePath: '/repay/receiptList', intentEquals: '借据列表正常展示',
+        apiUrl: '/loanNbr/loanNbr.json',
+        fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
+        sourceScenarioIds: ['正常借据可以提前结清']
+      }]
+    })
+    const input = { routePath: '/repay/receiptList', query: '借据列表正常展示' }
+    const direct = await start(input)
+    const directPlan = { ...plan, scenarios: [{ id: 'normal', apiUrl: '/loanNbr/loanNbr.json', data: { data: { list: [{ duestatus: '0' }] } } }] }
+    expect((await runtime.resume(direct.id, directPlan)).status).toBe('waiting_for_user')
+    const cloned = await start(input)
+    const clonedPlan = { ...plan, scenarios: [{ id: 'normal', apiUrl: '/loanNbr/loanNbr.json', sourceScenarioId: '正常借据可以提前结清' }] }
+    expect((await runtime.resume(cloned.id, clonedPlan)).status).toBe('waiting_for_user')
+  })
+
   it('omits an absent optional sessionId from the persisted workflow context', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-no-session' })
     const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target' ? resolvedTarget : ({ evidenceId: 'evidence-1' }))

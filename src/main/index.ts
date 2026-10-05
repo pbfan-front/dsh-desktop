@@ -5,7 +5,7 @@ import { createPersistentBusinessWorkflowRuntime } from './business-workflow-sto
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import { BUSINESS_SCENARIO_WORKFLOW_ID, registerBusinessScenarioWorkflow } from './business-scenario-workflow'
 import { summarizeBusinessScenarioTiming } from './business-scenario-timing'
-import { parseBusinessPluginWorkflows } from './business-plugin-contract'
+import { parseBusinessPluginSemanticRules, parseBusinessPluginWorkflows } from './business-plugin-contract'
 import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
 import { ensureBusinessWorkspace } from './business-workspace'
 import { reconcileBusinessWorkspaceRecords } from './business-workspace-registry'
@@ -3597,6 +3597,7 @@ async function bootstrap(): Promise<void> {
         runtime: businessWorkflowRuntime,
         pluginId: businessManifest.pluginId,
         definition: declaredWorkflows.find(workflow => workflow.id === BUSINESS_SCENARIO_WORKFLOW_ID),
+        semanticRules: parseBusinessPluginSemanticRules(businessManifest as Record<string, unknown>),
         requestBusiness: (path, body, sessionId) => businessPreview!.controlRequest(path, body, sessionId, true)
       })
     }

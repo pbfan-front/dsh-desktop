@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseBusinessPluginTargetAliases, parseBusinessPluginWorkflows } from '../src/main/business-plugin-contract'
+import { parseBusinessPluginSemanticRules, parseBusinessPluginTargetAliases, parseBusinessPluginWorkflows } from '../src/main/business-plugin-contract'
 
 const workflow = {
   id: 'business-scenario-create',
@@ -39,6 +39,26 @@ describe('business plugin workflow declarations', () => {
     const parsed = parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['0.9.0'] }] })
     expect(parsed[0]?.compatibleRunVersions).toEqual(['0.9.0'])
     expect(() => parseBusinessPluginWorkflows({ workflows: [{ ...workflow, compatibleRunVersions: ['1.0.0'] }] })).toThrow('must not repeat')
+  })
+})
+
+describe('business plugin semantic rules', () => {
+  const rule = {
+    id: 'receipt-normal-status', routePath: '/repay/receiptList', intentEquals: '借据列表正常展示',
+    apiUrl: '/loanNbr/loanNbr.json',
+    fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
+    sourceScenarioIds: ['正常借据可以提前结清']
+  }
+
+  it('accepts bounded declarative assertions without executable code', () => {
+    expect(parseBusinessPluginSemanticRules({ scenarioSemanticRules: [rule] })).toEqual([rule])
+  })
+
+  it('rejects unsafe paths and duplicate identifiers', () => {
+    expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [rule, rule] })).toThrow('duplicated')
+    expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{
+      ...rule, fieldAssertions: [{ path: ['__proto__'], equals: '0' }]
+    }] })).toThrow('unsafe')
   })
 })
 

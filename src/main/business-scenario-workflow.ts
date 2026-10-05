@@ -9,6 +9,7 @@ import type {
 import type { BusinessControlPath } from './business-preview'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessPluginWorkflowDeclaration } from './business-plugin-contract'
+import type { BusinessPluginSemanticRule } from './business-plugin-contract'
 
 export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
@@ -33,6 +34,7 @@ export function registerBusinessScenarioWorkflow(options: {
   pluginId: string
   requestBusiness: RequestBusiness
   definition?: BusinessPluginWorkflowDeclaration
+  semanticRules?: BusinessPluginSemanticRule[]
   nowMs?: () => number
 }): (input: BusinessScenarioWorkflowStartInput) => Promise<BusinessWorkflowRun> {
   const definition = scenarioDefinition(options.definition)
@@ -54,14 +56,16 @@ export function registerBusinessScenarioWorkflow(options: {
         apiUrls: input.apiUrls ?? []
       }, input.sessionId)
       const analyzeTargetMs = Math.max(0, nowMs() - analyzeStartedAt)
+      const semanticExpectations = matchingSemanticRules({ ...input, target }, options.semanticRules)
       return {
         output: analysis,
-        contextPatch: { analysis, target, requestTimings: { resolveTargetMs, analyzeTargetMs } }
+        contextPatch: { analysis, target, semanticExpectations, requestTimings: { resolveTargetMs, analyzeTargetMs } }
       }
     },
     'create-profile': async ({ context, previousOutput }) => {
       const input = parseStartInput(context)
       const plan = parsePlan(previousOutput)
+      assertSemanticPlan(matchingSemanticRules(context, options.semanticRules), plan)
       const analysis = record(context.analysis, 'Workflow analysis result is missing.')
       assertAnalysisQuality(analysis)
       const target = parseTarget(context.target)
@@ -95,7 +99,12 @@ export function registerBusinessScenarioWorkflow(options: {
     'business.preview-verification': ({ result }) => assertPreviewVerification(result.output)
   }, {
     pluginId: options.pluginId,
-    compatibleRunVersions: options.definition?.compatibleRunVersions
+    compatibleRunVersions: options.definition?.compatibleRunVersions,
+    checkpointValidators: options.semanticRules?.length ? {
+      'confirm-plan': ({ context, checkpointOutput }) => {
+        assertSemanticPlan(matchingSemanticRules(context, options.semanticRules), parsePlan(checkpointOutput))
+      }
+    } : undefined
   })
 
   return (input) => options.runtime.start({
@@ -103,6 +112,34 @@ export function registerBusinessScenarioWorkflow(options: {
     pluginId: options.pluginId,
     context: { ...parseStartInput(input) }
   })
+}
+
+function matchingSemanticRules(context: Record<string, unknown>, rules: BusinessPluginSemanticRule[] = []): BusinessPluginSemanticRule[] {
+  const target = context.target && typeof context.target === 'object' && !Array.isArray(context.target)
+    ? context.target as Record<string, unknown> : undefined
+  const routePath = target?.routePath ?? context.routePath
+  return rules.filter(rule => rule.routePath === routePath && rule.intentEquals === context.query)
+}
+
+function assertSemanticPlan(rules: BusinessPluginSemanticRule[], plan: BusinessScenarioWorkflowPlan): void {
+  for (const rule of rules) {
+    const candidates = plan.scenarios.filter(scenario => scenario.apiUrl === rule.apiUrl)
+    const matched = candidates.some(scenario => scenario.sourceScenarioId
+      ? rule.sourceScenarioIds.includes(scenario.sourceScenarioId)
+      : rule.fieldAssertions.length > 0 && rule.fieldAssertions.every(assertion => {
+        const actual = assertion.path.reduce<unknown>((current, part) =>
+          current && typeof current === 'object' ? (current as Record<string | number, unknown>)[part] : undefined,
+        scenario.data)
+        return actual === assertion.equals
+      }))
+    if (!matched) {
+      throw {
+        code: 'WORKFLOW_SEMANTIC_MISMATCH',
+        message: `Confirmed plan does not satisfy business semantic rule ${rule.id}; review the Mock fields or source Scenario before creating a Profile.`,
+        retryable: false
+      }
+    }
+  }
 }
 
 function scenarioDefinition(declaration?: BusinessPluginWorkflowDeclaration): BusinessWorkflowDefinition {

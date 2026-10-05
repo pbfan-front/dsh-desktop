@@ -36,6 +36,15 @@ export interface BusinessPluginTargetAlias {
   aliases: string[]
 }
 
+export interface BusinessPluginSemanticRule {
+  id: string
+  routePath: string
+  intentEquals: string
+  apiUrl: string
+  fieldAssertions: Array<{ path: Array<string | number>; equals: string | number | boolean | null }>
+  sourceScenarioIds: string[]
+}
+
 const capabilitySet = new Set<string>(businessPluginCapabilities)
 const safeId = /^[a-z0-9][a-z0-9._-]{1,127}$/
 const workflowStepTypes = new Set(['deterministic', 'agent', 'checkpoint'])
@@ -144,6 +153,48 @@ export function parseBusinessPluginTargetAliases(manifest: Record<string, unknow
       .map(alias => alias.trim())
     if (aliases.length === 0) throw new Error(`Business plugin target aliases for ${routePath} cannot be empty.`)
     return { routePath, aliases }
+  })
+}
+
+export function parseBusinessPluginSemanticRules(manifest: Record<string, unknown>): BusinessPluginSemanticRule[] {
+  if (manifest.scenarioSemanticRules === undefined) return []
+  if (!Array.isArray(manifest.scenarioSemanticRules) || manifest.scenarioSemanticRules.length > 128) {
+    throw new Error('Business plugin scenarioSemanticRules must be an array of at most 128 rules.')
+  }
+  const ids = new Set<string>()
+  return manifest.scenarioSemanticRules.map((value) => {
+    const rule = object(value, 'Business plugin semantic rule must be an object.')
+    const id = safeText(rule.id, 'Business plugin semantic rule id is missing.', 128)
+    if (!safeId.test(id) || ids.has(id)) throw new Error(`Business plugin semantic rule id is unsafe or duplicated: ${id}`)
+    ids.add(id)
+    const routePath = safeText(rule.routePath, `Semantic rule ${id} routePath is missing.`, 500)
+    const apiUrl = safeText(rule.apiUrl, `Semantic rule ${id} apiUrl is missing.`, 500)
+    if (!routePath.startsWith('/') || routePath.startsWith('//') || !apiUrl.startsWith('/') || apiUrl.startsWith('//')) {
+      throw new Error(`Semantic rule ${id} routePath or apiUrl is unsafe.`)
+    }
+    const intentEquals = safeText(rule.intentEquals, `Semantic rule ${id} intentEquals is missing.`, 1000)
+    if (!Array.isArray(rule.fieldAssertions) || rule.fieldAssertions.length > 16) {
+      throw new Error(`Semantic rule ${id} fieldAssertions must contain at most 16 assertions.`)
+    }
+    const fieldAssertions = rule.fieldAssertions.map((entry) => {
+      const assertion = object(entry, `Semantic rule ${id} field assertion must be an object.`)
+      if (!Array.isArray(assertion.path) || assertion.path.length < 1 || assertion.path.length > 12
+        || assertion.path.some(part => typeof part === 'number'
+          ? !Number.isSafeInteger(part) || part < 0 || part > 1000
+          : typeof part !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part) || ['__proto__', 'constructor', 'prototype'].includes(part))) {
+        throw new Error(`Semantic rule ${id} field assertion path is unsafe.`)
+      }
+      if (assertion.equals !== null && !['string', 'number', 'boolean'].includes(typeof assertion.equals)) {
+        throw new Error(`Semantic rule ${id} field assertion equals must be scalar.`)
+      }
+      return { path: assertion.path as Array<string | number>, equals: assertion.equals as string | number | boolean | null }
+    })
+    const sourceScenarioIds = rule.sourceScenarioIds === undefined
+      ? [] : stringList(rule.sourceScenarioIds, `Semantic rule ${id} sourceScenarioIds`, 32, 128)
+    if (fieldAssertions.length === 0 && sourceScenarioIds.length === 0) {
+      throw new Error(`Semantic rule ${id} has no assertions or source scenarios.`)
+    }
+    return { id, routePath, intentEquals, apiUrl, fieldAssertions, sourceScenarioIds }
   })
 }
 
