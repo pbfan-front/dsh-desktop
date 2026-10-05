@@ -212,13 +212,42 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       throw error
     }
   }
-  const readAnalysisCache = async () => {
+  const analysisCacheState = (async () => {
     try {
       const value = JSON.parse(await readFile(analysisCacheFile, 'utf8'))
       return value?.schemaVersion === 1 && plainObject(value.entries) ? value : { schemaVersion: 1, entries: {} }
     } catch {
       return { schemaVersion: 1, entries: {} }
     }
+  })()
+  const readAnalysisCache = () => analysisCacheState
+  let analysisCacheDirty = false
+  let analysisCachePersistTimer
+  let analysisCachePersistQueue = Promise.resolve()
+  const flushAnalysisCache = async () => {
+    if (analysisCachePersistTimer) {
+      clearTimeout(analysisCachePersistTimer)
+      analysisCachePersistTimer = undefined
+    }
+    if (analysisCacheDirty) {
+      analysisCacheDirty = false
+      const cache = await readAnalysisCache()
+      const snapshot = { schemaVersion: 1, entries: { ...cache.entries } }
+      analysisCachePersistQueue = analysisCachePersistQueue.catch(() => {}).then(() => atomicJson(analysisCacheFile, snapshot))
+        .catch(error => {
+          analysisCacheDirty = true
+          throw error
+        })
+    }
+    await analysisCachePersistQueue
+  }
+  const scheduleAnalysisCachePersistence = () => {
+    if (analysisCachePersistTimer) clearTimeout(analysisCachePersistTimer)
+    analysisCachePersistTimer = setTimeout(() => {
+      analysisCachePersistTimer = undefined
+      void flushAnalysisCache().catch(error => console.warn(`[business-runtime] failed to persist analysis cache: ${error.message}`))
+    }, 500)
+    analysisCachePersistTimer.unref()
   }
   const contentHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const scenarioArray = config => Array.isArray(config?.scenarios)
@@ -1151,7 +1180,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const entries = Object.entries(cache.entries)
         .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
         .slice(0, 100)
-      await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: Object.fromEntries(entries) })
+      cache.entries = Object.fromEntries(entries)
+      analysisCacheDirty = true
+      scheduleAnalysisCachePersistence()
     }
     scheduleMockConfigCachePersistence()
     result.analysisTimings = {
@@ -1362,7 +1393,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: Object.keys((await readAnalysisCache()).entries).length })
         }
         if (url.pathname === '/__desktop/analysis-cache/clear' && req.method === 'POST') {
-          await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: {} })
+          const cache = await readAnalysisCache()
+          cache.entries = {}
+          analysisCacheDirty = true
+          await flushAnalysisCache()
           invalidateSessionAnalysisReuse()
           return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: 0 })
         }
@@ -1715,6 +1749,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         mockConfigCachePersistTimer = undefined
       }
       await persistMockConfigCache()
+      await flushAnalysisCache()
       server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close()
     } }
 }

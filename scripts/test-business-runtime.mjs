@@ -292,6 +292,8 @@ try {
   })).json()
   assert.equal(cachedReceiptAnalysis.acceleration.usedCache, true, JSON.stringify(cachedReceiptAnalysis.acceleration))
   assert.equal(cachedReceiptAnalysis.acceleration.sourceRevalidated, true)
+  const pendingCacheStatus = await (await get('/__desktop/analysis-mode', { headers })).json()
+  assert.ok(pendingCacheStatus.cacheEntries > 0)
   const strictModeResponse = await get('/__desktop/analysis-mode/set', {
     method: 'POST', headers, body: JSON.stringify({ mode: 'strict' })
   })
@@ -300,6 +302,7 @@ try {
   const clearAnalysisCacheResponse = await get('/__desktop/analysis-cache/clear', { method: 'POST', headers, body: '{}' })
   assert.equal(clearAnalysisCacheResponse.status, 200)
   assert.equal((await clearAnalysisCacheResponse.json()).cacheEntries, 0)
+  assert.deepEqual(JSON.parse(await readFile(resolve(userRoot, 'analysis-candidate-cache.json'), 'utf8')).entries, {})
   const disableSessionReuseResponse = await get('/__desktop/analysis-mode/set', {
     method: 'POST', headers, body: JSON.stringify({ mode: 'strict', sessionReuse: false })
   })
@@ -515,6 +518,15 @@ try {
   assert.ok(!(await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
   assert.equal((await (await get('/__desktop/state', { headers })).json()).profileId, '')
   assert.equal((await (await get('/__desktop/state', { headers: sessionAHeaders })).json()).profileId, '')
+  const assistedBeforeClose = await get('/__desktop/analysis-mode/set', {
+    method: 'POST', headers, body: JSON.stringify({ mode: 'assisted' })
+  })
+  assert.equal(assistedBeforeClose.status, 200)
+  const pendingBeforeClose = await get('/__desktop/analyze-target', {
+    method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })
+  assert.equal(pendingBeforeClose.status, 200)
   await new Promise(done => {
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
     child.once('exit', () => { clearTimeout(timer); done() }); child.kill('SIGTERM')
@@ -525,6 +537,8 @@ try {
   assert.equal(persistedMockCache.buildId, context.buildId)
   assert.ok(persistedMockCache.entries.length > 1)
   assert.ok(persistedMockCache.entries.length <= 500)
+  const persistedAnalysisCache = JSON.parse(await readFile(resolve(userRoot, 'analysis-candidate-cache.json'), 'utf8'))
+  assert.ok(Object.keys(persistedAnalysisCache.entries).length > 0)
   const restartedChild = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
     execPath: resolve('node_modules/node/bin/node'), execArgv: [],
     env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot },
@@ -538,6 +552,13 @@ try {
       restartedChild.once('error', error => { clearTimeout(timer); reject(error) })
       restartedChild.once('exit', code => { clearTimeout(timer); reject(new Error(`Restart exited ${code}`)) })
     })
+    const restoredHintResponse = await fetch(new URL('/__desktop/analyze-target', restartedReady.origin), {
+      method: 'POST', headers: workflowHeaders,
+      body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+    })
+    const restoredHintAnalysis = await restoredHintResponse.json()
+    assert.equal(restoredHintResponse.status, 200, JSON.stringify(restoredHintAnalysis))
+    assert.equal(restoredHintAnalysis.acceleration.usedCache, true)
     const restartedResponse = await fetch(new URL('/__desktop/analyze-target', restartedReady.origin), {
       method: 'POST', headers: workflowHeaders,
       body: JSON.stringify({ routePath: '/loan/receiveAcct', query: '收款账户 校验失败' })
