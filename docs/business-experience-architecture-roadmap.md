@@ -327,7 +327,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | BEA-039 | P1 | 场景创建工作流端到端分段计时 | 已完成，真实 Desktop 完整流程验收通过 | Codex | - | 工作流持久记录目标解析、分析、方案确认等待、Profile 创建/应用、预览等待和严格验证耗时；真实侧栏预览与严格验证通过。Checkpoint 等待包含人工操作，不等同于实际渲染时间；测试 Profile 已回滚 |
 | BEA-040 | P1 | 黄金场景逐阶段基线与覆盖边界 | 已完成，15 场景回归通过 | Codex | - | 复用已有 15 个黄金场景，为分析、创建、应用、Mock 请求、回滚记录逐场景耗时；报告显式标注仅覆盖源码证据、Mock 命中和关键响应字段，不覆盖 Agent 意图解析、真实 iframe 渲染或视觉结果。下一步建立独立的 Desktop 端到端样本，不把运行时通过率冒充用户体验成功率 |
 | BEA-041 | P1 | Desktop 样本业务语义验收 | 已完成首个真实样本评估，发现假阳性 | Codex | - | 只读评估器按用例预期分别检查目标/意图、Mock 关键字段、真实 Scenario 请求和最终页面文案；显式路由样本不冒充 Agent 意图解析。首个“正常借据”完整工作流虽然内置预览验证通过，但 Mock `duestatus=1` 且页面出现“逾期”，故语义验收失败。后续需补更多真实对话样本并在方案确认阶段前移语义检查 |
-| BEA-042 | P1 | 插件声明的业务语义方案预检 | 已实现，自动化验收通过；真实 Desktop 待重建插件验证 | Codex | - | 业务插件可声明精确意图、路由、API 与字段/来源 Scenario 断言；工作流在确认 Checkpoint 接受输入前校验，不匹配时保留等待状态并允许修正，创建步骤再做同一检查以防绕过。规则只匹配插件声明的精确意图，不从一般自然语言臆断字段语义；最终 iframe 验证仍必需 |
+| BEA-042 | P1 | 插件声明的业务语义方案预检 | 已完成，自动化与真实 Desktop Runtime 接口验收通过 | Codex | - | 业务插件可声明精确意图、路由、API 与字段/来源 Scenario 断言；工作流在确认 Checkpoint 接受输入前校验，不匹配时保留等待状态并允许修正，创建步骤再做同一检查以防绕过。规则只匹配插件声明的精确意图，不从一般自然语言臆断字段语义；最终 iframe 验证仍必需 |
 
 ## 8. 更新记录
 
@@ -365,7 +365,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-05 | BEA-039 对话链路分段复核 | 从上述 Desktop 对话样本的 Harness `session.v3.jsonl.zstd` 事件时间戳复核：从 `turn/start` 到 `turn/end` 共 9486ms；首次模型请求记录到工具调用约 3577ms（约 2098ms 后出现首个推理片段），工具调用至结果 165ms，工具结果至最终回复约 5702ms（约 1188ms 后出现首个推理片段，正文生成约 2197ms）。两次请求输入分别约 13904、15463 token。记录可定位模型请求/输出与工具边界，但首片段前仍混合调度、网络、排队和推理，不能单列为纯模型推理耗时。该样本说明 105ms 工作流不是约 9 秒用户等待的主要部分；下一步优先缩减对话往返与上下文，而非继续优化毫秒级工作流内部阶段 |
 | 2026-10-05 | 完成 BEA-040 黄金场景阶段基线 | `npm run business:regression` 通过 15/15 个现有场景；单次运行中逐场景总耗时合计 776.66ms，分析阶段合计 499.4ms，第一个借据场景 215.2ms 包含冷启动影响。JSON 报告记录每个阶段与覆盖边界，位于 `build/reports/business-regression/latest.json`。该数据只说明受控业务运行时的源码证据、Mock 命中和关键字段成立，不包含 Agent 目标理解、真实 iframe 页面或最终视觉结果，不能与约 9 秒的 Desktop 对话样本直接比较 |
 | 2026-10-05 | BEA-041 首个 Desktop 语义样本 | 新增 `scripts/evaluate-business-experience.mjs` 与可扩展用例规格；只读评估已保存 run `55d23a50-2b63-434b-b760-f5dea3594f4a`。目标路由与真实 Scenario 请求通过，但“正常借据”方案中的 `data.list[0].duestatus` 为 `1` 而预期是 `0`，页面出现“逾期”，因此整体失败；显式指定路由使 Agent 意图解析仍未测。命令：`node scripts/evaluate-business-experience.mjs build/workflow-runs.json 55d23a50-2b63-434b-b760-f5dea3594f4a receipt-normal`；退出码 1 是预期的语义失败，不代表脚本故障。此评估不修改 Profile、Mock 或工作流历史 |
-| 2026-10-05 | BEA-042 确认前语义预检 | Desktop 增加受限的插件 `scenarioSemanticRules` 声明与 Checkpoint 校验；`demo-test` 只对精确意图“借据列表正常展示”声明 `/loanNbr/loanNbr.json` 的 `data.list[0].duestatus=0`，或允许使用经业务源码核对的“正常借据可以提前结清”来源 Scenario。旧样本的 `duestatus=1` 方案会在 Profile 写入前被拒绝，工作流留在 `confirm-plan` 可修正。当前运行中的业务包尚未重新导出，需重建插件并重启开发进程后才会在真实 Desktop 中生效；未改变现有 Profile/Mock |
+| 2026-10-05 | BEA-042 确认前语义预检 | Desktop 增加受限的插件 `scenarioSemanticRules` 声明与 Checkpoint 校验；`demo-test` 只对精确意图“借据列表正常展示”声明 `/loanNbr/loanNbr.json` 的 `data.list[0].duestatus=0`，或允许使用经业务源码核对的“正常借据可以提前结清”来源 Scenario。已重建 `demo-test` 插件、导出 Desktop 业务包并重启 `dev:business`；通过真实 Desktop Runtime 接口运行 `node scripts/verify-business-semantic-rule.mjs`：`duestatus=1` 返回 422 且保留 `confirm-plan`，改为允许的来源 Scenario 后进入 `wait-for-preview`。测试运行 `83e69438-5875-4640-bfca-7174e938b308` 已取消，隔离 Profile 的创建操作已回滚并确认不存在。该验收未覆盖最终 iframe 页面视觉/业务语义，不替代后续完整体验验证；未改变现有用户 Profile/Mock。 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |

@@ -133,11 +133,9 @@ function assertSemanticPlan(rules: BusinessPluginSemanticRule[], plan: BusinessS
         return actual === assertion.equals
       }))
     if (!matched) {
-      throw {
-        code: 'WORKFLOW_SEMANTIC_MISMATCH',
-        message: `Confirmed plan does not satisfy business semantic rule ${rule.id}; review the Mock fields or source Scenario before creating a Profile.`,
-        retryable: false
-      }
+      throw Object.assign(new Error(
+        `Confirmed plan does not satisfy business semantic rule ${rule.id}; review the Mock fields or source Scenario before creating a Profile.`
+      ), { code: 'WORKFLOW_SEMANTIC_MISMATCH', retryable: false })
     }
   }
 }
