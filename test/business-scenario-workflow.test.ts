@@ -33,6 +33,51 @@ const verification = {
 }
 
 describe('business scenario workflow', () => {
+  it('keeps ambiguous route candidates in one run and analyzes only after user-confirmed selection', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-ambiguous' })
+    const candidates = [
+      { routePath: '/repay/receiptList', pageTitle: '还款查询' },
+      { routePath: '/loanPurpose/receiptList/:batchId', pageTitle: '借据列表' }
+    ]
+    const requestBusiness = vi.fn(async (path: string, body: unknown) => {
+      if (path === '/__desktop/resolve-target') {
+        if ((body as { routePath?: string }).routePath === '/repay/receiptList') {
+          return { ...resolvedTarget, routePath: '/repay/receiptList' }
+        }
+        throw Object.assign(new Error('Multiple business pages match the intent.'), {
+          code: 'E_TARGET_ROUTE_AMBIGUOUS', retryable: true, candidates
+        })
+      }
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-receipt' }
+      throw new Error('No write should happen before plan confirmation.')
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+
+    const ambiguous = await start({ query: '借据列表正常展示' })
+    expect(ambiguous.status).toBe('failed')
+    expect(ambiguous.currentStepId).toBe('analyze-target')
+    expect(ambiguous.steps[0]?.error).toMatchObject({ code: 'E_TARGET_ROUTE_AMBIGUOUS', candidates })
+    expect(requestBusiness).toHaveBeenCalledTimes(1)
+    const restoredRuntime = new BusinessWorkflowRuntime()
+    restoredRuntime.restoreRuns([JSON.parse(JSON.stringify(ambiguous))])
+    registerBusinessScenarioWorkflow({ runtime: restoredRuntime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    await expect(restoredRuntime.retry(ambiguous.id)).rejects.toThrow('Choose one')
+    await expect(restoredRuntime.retry(ambiguous.id, { selectedRoutePath: '/repay/receiptList', confirmedByUser: false })).rejects.toThrow('User confirmation')
+    await expect(restoredRuntime.retry(ambiguous.id, { selectedRoutePath: '/credit/productCombine', confirmedByUser: true })).rejects.toThrow('not one of the saved candidates')
+    expect(restoredRuntime.getRun(ambiguous.id)?.status).toBe('failed')
+    expect(requestBusiness).toHaveBeenCalledTimes(1)
+
+    const resolved = await restoredRuntime.retry(ambiguous.id, { selectedRoutePath: '/repay/receiptList', confirmedByUser: true })
+    expect(resolved.id).toBe(ambiguous.id)
+    expect(resolved.status).toBe('waiting_for_user')
+    expect(resolved.currentStepId).toBe('confirm-plan')
+    expect(resolved.context).toMatchObject({ routePath: '/repay/receiptList',
+      targetSelection: { routePath: '/repay/receiptList', source: 'user-confirmed-candidate' },
+      target: { routePath: '/repay/receiptList' } })
+    expect(requestBusiness).toHaveBeenCalledTimes(3)
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/analyze-target')).toHaveLength(1)
+  })
+
   it('separates request work from plan and preview waiting in persisted runs', async () => {
     let wallMs = 0
     let monotonicMs = 0

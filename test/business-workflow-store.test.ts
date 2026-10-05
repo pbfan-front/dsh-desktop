@@ -70,6 +70,24 @@ describe('business workflow store', () => {
     })
   })
 
+  it('restores bounded route candidates for a retryable ambiguity and rejects unsafe persisted candidates', async () => {
+    const { store } = await fixture()
+    const ambiguous = run('failed')
+    ambiguous.currentStepId = 'confirm-plan'
+    ambiguous.steps[0]!.status = 'failed'
+    ambiguous.steps[0]!.error = { code: 'E_TARGET_ROUTE_AMBIGUOUS', message: 'Choose a page.', retryable: true,
+      candidates: [{ routePath: '/repay/receiptList', pageTitle: '还款查询' }] }
+    await store.save([ambiguous])
+    expect((await store.load()).runs[0]?.steps[0]?.error?.candidates).toEqual([
+      { routePath: '/repay/receiptList', pageTitle: '还款查询' }
+    ])
+    ambiguous.steps[0]!.error!.candidates = [{ routePath: '//untrusted' }]
+    await store.save([ambiguous])
+    const rejected = await store.load()
+    expect(rejected.runs).toEqual([])
+    expect(rejected.quarantinedPath).toBeTruthy()
+  })
+
   it('quarantines malformed state and starts with an empty collection', async () => {
     const { root, storagePath, store } = await fixture()
     await mkdir(join(root, 'workflows'), { recursive: true })

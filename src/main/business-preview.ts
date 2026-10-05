@@ -210,7 +210,11 @@ export class BusinessPreview {
     })
     const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` })) as Record<string, unknown>
     if (!response.ok) {
-      throw new Error(typeof payload.error === 'string' ? payload.error : `Business control request failed: HTTP ${response.status}`)
+      throw Object.assign(new Error(typeof payload.error === 'string' ? payload.error : `Business control request failed: HTTP ${response.status}`), {
+        ...(typeof payload.code === 'string' ? { code: payload.code } : {}),
+        ...(Array.isArray(payload.candidates) ? { candidates: payload.candidates } : {}),
+        retryable: true
+      })
     }
     return payload
   }

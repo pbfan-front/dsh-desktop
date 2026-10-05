@@ -592,6 +592,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const targetResolutionError = (code, message, candidates = []) => {
     const error = new Error(`${code}: ${message}${candidates.length ? ` Candidates: ${JSON.stringify(candidates.slice(0, 8))}` : ''}`)
     error.code = code
+    error.candidates = candidates.slice(0, 8).map(routeCandidate)
     return error
   }
   const resolveTarget = async (input, sessionId = 'default') => {
@@ -1504,7 +1505,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         }
         if (url.pathname === '/__desktop/resolve-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }
-          try { return respond(res, 200, await resolveTarget(JSON.parse(body), sessionId)) } catch (error) { return respond(res, 422, { error: error.message, code: error.code }) }
+          try { return respond(res, 200, await resolveTarget(JSON.parse(body), sessionId)) } catch (error) { return respond(res, 422, { error: error.message, code: error.code, candidates: error.candidates }) }
         }
         if (url.pathname === '/__desktop/analyze-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }

@@ -152,6 +152,11 @@ function isWorkflowStepRun(value: unknown): value is BusinessWorkflowStepRun {
   if (value.completedAt !== undefined && !isString(value.completedAt)) return false
   if (value.error !== undefined) {
     if (!isRecord(value.error) || !isString(value.error.code) || !isString(value.error.message) || typeof value.error.retryable !== 'boolean') return false
+    if (value.error.candidates !== undefined && (!Array.isArray(value.error.candidates) || value.error.candidates.length > 8
+      || value.error.candidates.some(candidate => !isRecord(candidate)
+        || !isString(candidate.routePath) || candidate.routePath.length > 500
+        || !candidate.routePath.startsWith('/') || candidate.routePath.startsWith('//')
+        || (candidate.pageTitle !== undefined && (typeof candidate.pageTitle !== 'string' || candidate.pageTitle.length > 200))))) return false
   }
   return true
 }

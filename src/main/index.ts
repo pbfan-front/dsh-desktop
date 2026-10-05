@@ -3587,7 +3587,7 @@ async function bootstrap(): Promise<void> {
         if (typeof input.runId !== 'string') throw new Error('Workflow runId is required.')
         if (action === 'get') return { run: businessWorkflowRuntime.getRun(input.runId) ?? null }
         if (action === 'resume') return businessWorkflowRuntime.resume(input.runId, input.checkpointOutput)
-        if (action === 'retry') return businessWorkflowRuntime.retry(input.runId)
+        if (action === 'retry') return businessWorkflowRuntime.retry(input.runId, input.retryInput)
         return businessWorkflowRuntime.cancel(input.runId)
       }
     })

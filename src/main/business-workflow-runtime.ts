@@ -40,11 +40,16 @@ export type BusinessWorkflowCheckpointValidator = (
   context: BusinessWorkflowStepContext & { checkpointOutput: unknown }
 ) => Promise<void> | void
 
+export type BusinessWorkflowRetryValidator = (
+  context: BusinessWorkflowStepContext & { error: BusinessWorkflowError; retryInput: unknown }
+) => Promise<BusinessWorkflowStepResult> | BusinessWorkflowStepResult
+
 interface RegisteredWorkflow {
   definition: BusinessWorkflowDefinition
   handlers: BusinessWorkflowHandlers
   gates: BusinessWorkflowGates
   checkpointValidators: Record<string, BusinessWorkflowCheckpointValidator>
+  retryValidators: Record<string, BusinessWorkflowRetryValidator>
   pluginId?: string
   compatibleRunVersions: Set<string>
 }
@@ -53,6 +58,7 @@ export interface BusinessWorkflowRegistrationOptions {
   pluginId?: string
   compatibleRunVersions?: string[]
   checkpointValidators?: Record<string, BusinessWorkflowCheckpointValidator>
+  retryValidators?: Record<string, BusinessWorkflowRetryValidator>
 }
 
 export interface BusinessWorkflowRuntimeOptions {
@@ -105,12 +111,18 @@ export class BusinessWorkflowRuntime {
         throw new Error(`Workflow checkpoint validator has no matching checkpoint: ${definition.id}/${stepId}`)
       }
     }
+    for (const stepId of Object.keys(options.retryValidators ?? {})) {
+      if (!definition.steps.some(step => step.id === stepId && step.type !== 'checkpoint')) {
+        throw new Error(`Workflow retry validator has no matching deterministic step: ${definition.id}/${stepId}`)
+      }
+    }
     if (options.pluginId !== undefined && !safeId.test(options.pluginId)) throw new Error('Workflow registration pluginId is unsafe.')
     const compatibleRunVersions = new Set(options.compatibleRunVersions ?? [])
     compatibleRunVersions.delete(definition.version)
     this.workflows.set(definition.id, {
       definition: clone(definition), handlers: { ...handlers }, gates: { ...gates },
       checkpointValidators: { ...options.checkpointValidators },
+      retryValidators: { ...options.retryValidators },
       pluginId: options.pluginId, compatibleRunVersions
     })
   }
@@ -195,13 +207,29 @@ export class BusinessWorkflowRuntime {
     return this.execute(runId)
   }
 
-  async retry(runId: string): Promise<BusinessWorkflowRun> {
+  async retry(runId: string, retryInput?: unknown): Promise<BusinessWorkflowRun> {
     const run = this.requireRun(runId)
     await this.ensureRunnableCompatibility(run)
     if (run.status !== 'failed' || !run.currentStepId) throw new Error(`Workflow has no failed step to retry: ${runId}`)
     const step = run.steps.find((candidate) => candidate.id === run.currentStepId)
     if (!step || step.status !== 'failed' || step.error?.retryable !== true) {
       throw new Error(`Workflow failed step is not retryable: ${runId}`)
+    }
+    assertSerializable(retryInput, 'retry input')
+    const workflow = this.requireWorkflow(run.workflowId)
+    const validator = workflow.retryValidators[step.id]
+    if (validator) {
+      const definition = workflow.definition.steps.find(candidate => candidate.id === step.id)!
+      const previousStep = run.steps[run.steps.indexOf(step) - 1]
+      const result = await validator({
+        runId: run.id, workflowId: run.workflowId, pluginId: run.pluginId,
+        step: clone(definition), context: clone(run.context), previousOutput: clone(previousStep?.output),
+        error: clone(step.error), retryInput: clone(retryInput)
+      })
+      assertSerializable(result, `workflow retry validation ${step.id}`)
+      if (result.contextPatch) Object.assign(run.context, clone(result.contextPatch))
+    } else if (retryInput !== undefined) {
+      throw new Error(`Workflow step ${step.id} does not accept retry input.`)
     }
     step.status = 'pending'
     step.error = undefined
@@ -394,7 +422,14 @@ function validateDefinition(definition: BusinessWorkflowDefinition): void {
 }
 
 function normalizeError(error: unknown): BusinessWorkflowError {
-  if (isWorkflowError(error)) return error
+  if (isWorkflowError(error)) {
+    const candidates = Array.isArray(error.candidates) ? error.candidates.filter(candidate =>
+      candidate && typeof candidate === 'object' && typeof candidate.routePath === 'string'
+      && candidate.routePath.length <= 500 && candidate.routePath.startsWith('/') && !candidate.routePath.startsWith('//')
+      && (candidate.pageTitle === undefined || (typeof candidate.pageTitle === 'string' && candidate.pageTitle.length <= 200))) : []
+    return { code: error.code, message: error.message, retryable: error.retryable,
+      ...(candidates.length ? { candidates: candidates.slice(0, 8) } : {}) }
+  }
   return {
     code: 'WORKFLOW_STEP_FAILED',
     message: error instanceof Error ? error.message : String(error),

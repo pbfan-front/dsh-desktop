@@ -112,4 +112,6 @@ Desktop 现在在 Harness 启动前执行保守归一化：
 
 Agent 插件现提供 `business_start_scenario_workflow`、`business_resume_scenario_workflow`、`business_scenario_workflow_status`、`business_retry_scenario_workflow` 和 `business_cancel_scenario_workflow`。这些工具先经过业务服务的随机令牌鉴权，再由白名单父子进程消息桥交给 Desktop 宿主；插件不能注册定义或执行任意代码。原有分析、创建、应用和验证工具继续保留，在 GUI 验收完成前作为明确的回退路径。
 
+目标解析遇到多个同名页面时，业务服务返回带路由和页面标题的结构化候选，工作流将其保存在失败步骤中。Agent 必须先把候选展示给用户；只有用户明确选择后，才能调用 `business_retry_scenario_workflow(runId, selectedRoutePath, confirmedByUser=true)`。Desktop 只接受该运行保存的候选路由，错误或未确认的选择不改变运行状态。有效选择在同一运行中重试目标解析，然后进入尚未开始的源码分析，不创建新运行或提前写入 Profile。其他可重试失败仍可不带选择参数按原方式重试。
+
 业务插件可选地在 manifest 中声明 `scenarioSemanticRules`。每条规则使用精确路由、精确意图和 API，指定直接 Mock 数据的标量字段断言及可接受的来源 Scenario ID；不执行插件脚本或正则。命中规则会随分析结果送给 Agent 供确认方案时审阅。Desktop 在接受 `confirm-plan` 输入前重新按当前插件规则校验，失败时保持检查点等待而不写 Profile；创建步骤重复校验作为防线。未声明或未精确匹配的意图不套用业务猜测，最终页面与真实请求验证仍不可省略。

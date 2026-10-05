@@ -51,6 +51,16 @@ describe('business Harness plugin', () => {
         },
         required: ['runId'],
       })
+      const retryTool = definitions.find(tool => tool.name === 'business_retry_scenario_workflow')
+      expect(retryTool.parameters).toMatchObject({
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          selectedRoutePath: { type: 'string' },
+          confirmedByUser: { type: 'boolean' }
+        },
+        required: ['runId']
+      })
       const analysisModeTool = definitions.find(tool => tool.name === 'business_set_analysis_mode')
       expect(analysisModeTool.parameters).toMatchObject({
         type: 'object',

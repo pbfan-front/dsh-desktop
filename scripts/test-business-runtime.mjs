@@ -92,6 +92,14 @@ try {
   assert.equal(pageHintTargetResponse.status, 200, JSON.stringify(pageHintTarget))
   assert.equal(pageHintTarget.routePath, '/loan/receiveAcct')
   assert.equal(pageHintTarget.source, 'page-hint')
+  const ambiguousTargetResponse = await get('/__desktop/resolve-target', {
+    method: 'POST', headers, body: JSON.stringify({ query: '借据列表正常展示' })
+  })
+  const ambiguousTarget = await ambiguousTargetResponse.json()
+  assert.equal(ambiguousTargetResponse.status, 422)
+  assert.equal(ambiguousTarget.code, 'E_TARGET_ROUTE_AMBIGUOUS')
+  assert.ok(ambiguousTarget.candidates.some(candidate => candidate.routePath === '/repay/receiptList'))
+  assert.ok(ambiguousTarget.candidates.every(candidate => candidate.routePath.startsWith('/')))
   const missingTargetResponse = await get('/__desktop/resolve-target', {
     method: 'POST', headers, body: JSON.stringify({ query: '创建一个普通失败场景' })
   })

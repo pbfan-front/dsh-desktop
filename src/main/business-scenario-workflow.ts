@@ -104,7 +104,26 @@ export function registerBusinessScenarioWorkflow(options: {
       'confirm-plan': ({ context, checkpointOutput }) => {
         assertSemanticPlan(matchingSemanticRules(context, options.semanticRules), parsePlan(checkpointOutput))
       }
-    } : undefined
+    } : undefined,
+    retryValidators: {
+      'analyze-target': ({ error, retryInput }) => {
+        if (error.code !== 'E_TARGET_ROUTE_AMBIGUOUS') {
+          if (retryInput !== undefined) throw new Error('Target selection is only accepted for an ambiguous route failure.')
+          return {}
+        }
+        const selection = record(retryInput, 'Choose one of the saved candidate routes before retrying.')
+        const selectedRoutePath = text(selection.selectedRoutePath, 'selectedRoutePath is required.', 500)
+        if (selection.confirmedByUser !== true) throw new Error('User confirmation is required to select an ambiguous business page.')
+        if (Object.keys(selection).some(key => !['selectedRoutePath', 'confirmedByUser'].includes(key))) {
+          throw new Error('Target selection contains unsupported fields.')
+        }
+        if (!error.candidates?.some(candidate => candidate.routePath === selectedRoutePath)) {
+          throw new Error('The selected route is not one of the saved candidates for this run.')
+        }
+        return { contextPatch: { routePath: selectedRoutePath,
+          targetSelection: { routePath: selectedRoutePath, source: 'user-confirmed-candidate' } } }
+      }
+    }
   })
 
   return (input) => options.runtime.start({

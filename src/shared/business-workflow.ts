@@ -19,6 +19,7 @@ export interface BusinessWorkflowError {
   code: string
   message: string
   retryable: boolean
+  candidates?: Array<{ routePath: string; pageTitle?: string }>
 }
 
 export interface BusinessWorkflowStepDefinition {
