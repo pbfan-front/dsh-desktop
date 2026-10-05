@@ -416,11 +416,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return output
   }
-  const changedPayloadFields = (baseData, scenarioData) => {
-    const basePayload = plainObject(baseData?.data) ? baseData.data : baseData
-    const scenarioPayload = plainObject(scenarioData?.data) ? scenarioData.data : scenarioData
-    const base = leafFieldValues(basePayload)
-    const scenario = leafFieldValues(scenarioPayload)
+  const payloadLeafFields = value => leafFieldValues(plainObject(value?.data) ? value.data : value)
+  const changedPayloadFields = (baseData, scenarioData, preparedBase) => {
+    const base = preparedBase || payloadLeafFields(baseData)
+    const scenario = payloadLeafFields(scenarioData)
     return [...new Set([...base.keys(), ...scenario.keys()].filter(field => JSON.stringify(base.get(field)) !== JSON.stringify(scenario.get(field))))].slice(0, 80)
   }
   const fieldConsumptionIndex = sources => {
@@ -689,7 +688,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     const apis = []
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
-      sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0 }
+      sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
+      baselineBuildCount: 0, scenarioDiffCount: 0 }
     for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
       let relativePath
       try { relativePath = apiMockRelative(candidate.apiUrl) } catch { continue }
@@ -701,6 +701,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const config = existing?.config || generated.config
       const scenarios = scenarioArray(config)
       const template = config.baseData || scenarios[0]?.data || {}
+      const baseLeafFields = payloadLeafFields(template)
+      fieldImpactAnalysis.baselineBuildCount += 1
       const searchable = `${candidate.apiUrl} ${config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
       candidate.score += queryScore(searchable, 60, 180)
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
@@ -729,7 +731,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         return fieldEvidence
       }
       const scenarioSummaries = scenarios.slice(0, 50).map(item => {
-        const changedFields = changedPayloadFields(template, item.data)
+        fieldImpactAnalysis.scenarioDiffCount += 1
+        const changedFields = changedPayloadFields(template, item.data, baseLeafFields)
         const fieldEvidence = changedFields.map(field => ({ field, evidence: cachedFieldEvidence(field) }))
         const consumedFields = fieldEvidence.filter(item => item.evidence.length > 0).map(item => item.field)
         const unprovenFields = fieldEvidence.filter(item => item.evidence.length === 0).map(item => item.field)
@@ -805,7 +808,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       },
       fieldImpactAnalysis: {
         ...fieldImpactAnalysis,
-        avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount)
+        avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount),
+        avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length

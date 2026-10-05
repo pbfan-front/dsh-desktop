@@ -155,6 +155,12 @@ try {
       - receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount
     < receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.baselineBuildCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.scenarioDiffCount
+    > receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.baselineBuildCount)
+  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedBaselineTraversals,
+    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.scenarioDiffCount
+      - receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.baselineBuildCount)
   assert.equal(receiveAccountAnalysis.analysisPlan.repositorySearch, 'not-needed')
   assert.equal(receiveAccountAnalysis.analysisPlan.qualityGate.level, 'ready')
   assert.equal(receiveAccountAnalysis.analysisPlan.qualityGate.decision, 'proceed-with-confirmation')
