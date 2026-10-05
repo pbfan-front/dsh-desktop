@@ -686,6 +686,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!acceleration.usedCache && !acceleration.usedRecentRequests) acceleration.fallback = 'no-valid-hints'
     }
     const apis = []
+    const fieldImpactAnalysis = { strategy: 'per-api-field-evidence-memoization', lookupCount: 0, cacheHitCount: 0, sourceScanCount: 0 }
     for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
       let relativePath
       try { relativePath = apiMockRelative(candidate.apiUrl) } catch { continue }
@@ -701,9 +702,21 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       candidate.score += queryScore(searchable, 60, 180)
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
       const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
+      const fieldEvidenceCache = new Map()
+      const cachedFieldEvidence = field => {
+        fieldImpactAnalysis.lookupCount += 1
+        if (fieldEvidenceCache.has(field)) {
+          fieldImpactAnalysis.cacheHitCount += 1
+          return fieldEvidenceCache.get(field)
+        }
+        fieldImpactAnalysis.sourceScanCount += 1
+        const fieldEvidence = fieldConsumptionEvidence(field, consumerSources)
+        fieldEvidenceCache.set(field, fieldEvidence)
+        return fieldEvidence
+      }
       const scenarioSummaries = scenarios.slice(0, 50).map(item => {
         const changedFields = changedPayloadFields(template, item.data)
-        const fieldEvidence = changedFields.map(field => ({ field, evidence: fieldConsumptionEvidence(field, consumerSources) }))
+        const fieldEvidence = changedFields.map(field => ({ field, evidence: cachedFieldEvidence(field) }))
         const consumedFields = fieldEvidence.filter(item => item.evidence.length > 0).map(item => item.field)
         const unprovenFields = fieldEvidence.filter(item => item.evidence.length === 0).map(item => item.field)
         return { id: item.id, label: item.label || item.id, changedFields,
@@ -775,6 +788,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         strategy: 'intent-source-and-field-impact',
         fieldImpactMaxBonus: 50,
         note: 'Field consumption evidence improves ranking but never replaces intent matching or final iframe verification.'
+      },
+      fieldImpactAnalysis: {
+        ...fieldImpactAnalysis,
+        avoidedSourceScans: fieldImpactAnalysis.cacheHitCount
       },
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length
