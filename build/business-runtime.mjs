@@ -398,6 +398,46 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return [...new Set(fields)].slice(0, 120)
   }
+  const leafFieldValues = (value, prefix = '', depth = 0, output = new Map()) => {
+    if (depth > 4 || output.size >= 160) return output
+    if (Array.isArray(value)) {
+      if (value.length) leafFieldValues(value[0], `${prefix}[]`, depth + 1, output)
+      else if (prefix) output.set(prefix, value)
+      return output
+    }
+    if (!plainObject(value)) {
+      if (prefix) output.set(prefix, value)
+      return output
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key
+      leafFieldValues(child, path, depth + 1, output)
+      if (output.size >= 160) break
+    }
+    return output
+  }
+  const changedPayloadFields = (baseData, scenarioData) => {
+    const basePayload = plainObject(baseData?.data) ? baseData.data : baseData
+    const scenarioPayload = plainObject(scenarioData?.data) ? scenarioData.data : scenarioData
+    const base = leafFieldValues(basePayload)
+    const scenario = leafFieldValues(scenarioPayload)
+    return [...new Set([...base.keys(), ...scenario.keys()].filter(field => JSON.stringify(base.get(field)) !== JSON.stringify(scenario.get(field))))].slice(0, 80)
+  }
+  const fieldConsumptionEvidence = (field, sources) => {
+    const terminal = field.replace(/\[\]/g, '').split('.').at(-1)
+    if (!terminal || !/^[A-Za-z_$][\w$]*$/.test(terminal)) return []
+    const escaped = terminal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const pattern = new RegExp(`(?:\\.\\s*${escaped}\\b|\\[\\s*['\"]${escaped}['\"]\\s*\\]|\\b${escaped}\\s*:)`, 'g')
+    const matches = []
+    for (const sourceEntry of sources) {
+      for (const match of sourceEntry.text.matchAll(pattern)) {
+        matches.push({ file: sourceEntry.file, line: sourceEntry.text.slice(0, match.index).split('\n').length,
+          syntax: match[0].trim(), source: 'bounded-source-field-consumption' })
+        if (matches.length >= 3) return matches
+      }
+    }
+    return matches
+  }
   const routeTitle = route => String(route.title || route.comment || route.name || '').trim()
   const routeCandidate = route => ({ routePath: route.path, ...(routeTitle(route) ? { pageTitle: routeTitle(route) } : {}) })
   const normalizedHint = value => String(value || '').toLowerCase().replace(/[\s/\\?&#=_-]+/gu, '')
@@ -659,10 +699,22 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const template = config.baseData || scenarios[0]?.data || {}
       const searchable = `${candidate.apiUrl} ${config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
       candidate.score += queryScore(searchable, 60, 180)
+      const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
+      const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
+      const scenarioSummaries = scenarios.slice(0, 50).map(item => {
+        const changedFields = changedPayloadFields(template, item.data)
+        const fieldEvidence = changedFields.map(field => ({ field, evidence: fieldConsumptionEvidence(field, consumerSources) }))
+        const consumedFields = fieldEvidence.filter(item => item.evidence.length > 0).map(item => item.field)
+        const unprovenFields = fieldEvidence.filter(item => item.evidence.length === 0).map(item => item.field)
+        return { id: item.id, label: item.label || item.id, changedFields,
+          fieldImpact: { level: consumedFields.length === 0 ? 'unproven' : unprovenFields.length ? 'partial' : 'consumed',
+            consumedFields, unprovenFields, coverage: changedFields.length ? consumedFields.length / changedFields.length : 0,
+            evidence: fieldEvidence.filter(item => item.evidence.length > 0).slice(0, 12) } }
+      })
       apis.push({ ...candidate, mockPath: relativePath, mockExists: Boolean(existing), canGenerate: Boolean(existing || generated), typeEvidence: generated?.typeEvidence,
         label: config.label || candidate.apiUrl,
         envelopeFields: objectFields(template), fields: payloadFields(template.data),
-        scenarios: scenarios.slice(0, 50).map(item => ({ id: item.id, label: item.label || item.id })) })
+        scenarios: scenarioSummaries })
     }
     apis.sort((a, b) => b.score - a.score)
     apis.splice(20)
@@ -720,6 +772,26 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const uniqueConfidentMatch = confidentExistingMatch && strongestMatch
       && strongestMatch.apiUrl === focusApiUrls[0]
       && (!nextMatch || strongestMatch.score - nextMatch.score >= 40)
+    const strongestScenario = uniqueConfidentMatch
+      ? apis.find(api => api.apiUrl === strongestMatch.apiUrl)?.scenarios.find(scenario => scenario.id === strongestMatch.scenarioId)
+      : undefined
+    const strongestScenarioHasFieldImpact = Boolean(strongestScenario?.fieldImpact?.consumedFields?.length)
+    analysisPlan.fieldImpact = strongestMatch ? {
+      status: strongestScenarioHasFieldImpact ? strongestScenario.fieldImpact.level : 'unproven',
+      evidenceKind: 'bounded-source-field-consumption',
+      apiUrl: strongestMatch.apiUrl,
+      scenarioId: strongestMatch.scenarioId,
+      changedFields: strongestScenario?.changedFields || [],
+      consumedFields: strongestScenario?.fieldImpact?.consumedFields || [],
+      unprovenFields: strongestScenario?.fieldImpact?.unprovenFields || [],
+      coverage: strongestScenario?.fieldImpact?.coverage || 0,
+      finalUiVerificationRequired: true
+    } : {
+      status: 'pending-plan-fields',
+      evidenceKind: 'bounded-source-field-consumption',
+      changedFields: [], consumedFields: [], unprovenFields: [], coverage: 0,
+      finalUiVerificationRequired: true
+    }
     const focusApis = focusApiUrls.map(apiUrl => apis.find(api => api.apiUrl === apiUrl)).filter(Boolean)
     const allFocusApisGeneratable = focusApis.length > 0 && focusApis.every(api => api.canGenerate)
     const allFocusApisHaveSourceEvidence = focusApis.length > 0 && focusApis.every(api => Array.isArray(api.evidence) && api.evidence.length > 0)
@@ -730,6 +802,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     if (!allFocusApisHaveSourceEvidence) qualityGaps.push('source-evidence-missing')
     if (!explicitApis.length && !confidentExistingMatch) qualityGaps.push('intent-match-not-confident')
     if (confidentExistingMatch && !uniqueConfidentMatch) qualityGaps.push('existing-scenario-match-ambiguous')
+    if (uniqueConfidentMatch && !strongestScenarioHasFieldImpact) qualityGaps.push('matched-scenario-field-impact-unproven')
     let qualityScore = 20
     if (normalizedQuery) qualityScore += 10
     if (focusApis.length) qualityScore += 15
@@ -738,9 +811,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     if (explicitApis.length) qualityScore += 25
     else if (uniqueConfidentMatch) qualityScore += 25
     else if (confidentExistingMatch) qualityScore += 10
-    qualityScore = Math.max(0, Math.min(100, qualityScore - (qualityGaps.includes('existing-scenario-match-ambiguous') ? 10 : 0)))
+    qualityScore = Math.max(0, Math.min(100, qualityScore
+      - (qualityGaps.includes('existing-scenario-match-ambiguous') ? 10 : 0)
+      - (qualityGaps.includes('matched-scenario-field-impact-unproven') ? 20 : 0)))
     const ready = Boolean(normalizedQuery && focusApis.length && allFocusApisGeneratable && allFocusApisHaveSourceEvidence
-      && (explicitApis.length || uniqueConfidentMatch))
+      && (explicitApis.length || (uniqueConfidentMatch && strongestScenarioHasFieldImpact)))
     const reviewable = Boolean(normalizedQuery && focusApis.length && allFocusApisGeneratable && allFocusApisHaveSourceEvidence)
     analysisPlan.qualityGate = {
       score: qualityScore,
@@ -754,7 +829,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         focusApisGeneratable: allFocusApisGeneratable,
         focusApisHaveSourceEvidence: allFocusApisHaveSourceEvidence,
         confidentExistingMatch,
-        uniqueConfidentMatch
+        uniqueConfidentMatch,
+        strongestScenarioHasFieldImpact
       },
       guidance: ready
         ? 'Confirm the focused plan; existing workflow write and preview gates still apply.'

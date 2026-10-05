@@ -65,7 +65,18 @@ describe('business Harness plugin', () => {
           apiUrl: `/api/${index}.json`,
           evidence: Array.from({ length: 7 }, (_value, evidenceIndex) => `evidence-${index}-${evidenceIndex}`),
           fields: Array.from({ length: 50 }, (_value, fieldIndex) => `field-${fieldIndex}`),
-          scenarios: Array.from({ length: 10 }, (_value, scenarioIndex) => ({ id: `scenario-${index}-${scenarioIndex}` })),
+          scenarios: Array.from({ length: 10 }, (_value, scenarioIndex) => ({
+            id: `scenario-${index}-${scenarioIndex}`,
+            changedFields: Array.from({ length: 30 }, (_item, fieldIndex) => `field-${fieldIndex}`),
+            fieldImpact: {
+              consumedFields: Array.from({ length: 30 }, (_item, fieldIndex) => `field-${fieldIndex}`),
+              unprovenFields: Array.from({ length: 30 }, (_item, fieldIndex) => `other-${fieldIndex}`),
+              evidence: Array.from({ length: 12 }, (_item, fieldIndex) => ({
+                field: `field-${fieldIndex}`,
+                evidence: [{ line: 1 }, { line: 2 }, { line: 3 }],
+              })),
+            },
+          })),
         })),
         analysisPlan: {
           focusApiUrls: ['/api/4.json'],
@@ -81,6 +92,9 @@ describe('business Harness plugin', () => {
       expect(summary.context.analysis.apis[0].scenarios[0].id).toBe('scenario-7-9')
       expect(summary.context.analysis.apis[0].evidence).toHaveLength(4)
       expect(summary.context.analysis.apis[0].fields).toHaveLength(40)
+      expect(summary.context.analysis.apis[0].scenarios[0].changedFields).toHaveLength(24)
+      expect(summary.context.analysis.apis[0].scenarios[0].fieldImpact.evidence).toHaveLength(8)
+      expect(summary.context.analysis.apis[0].scenarios[0].fieldImpact.evidence[0].evidence).toHaveLength(2)
       expect(summary.context.analysis.compaction.omittedApiCount).toBe(6)
       expect(full.context.analysis.apis).toHaveLength(8)
       expect(workflowRun.context.analysis.apis).toHaveLength(8)

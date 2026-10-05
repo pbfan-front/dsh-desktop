@@ -34,7 +34,18 @@ function compactScenarios(analysis, api) {
     ...api.scenarios.filter(scenario => matched.has(scenario.id)),
     ...api.scenarios.filter(scenario => !matched.has(scenario.id))
   ]
-  return selected.slice(0, 8)
+  return selected.slice(0, 8).map(scenario => ({
+    ...scenario,
+    changedFields: limited(scenario.changedFields, 24),
+    fieldImpact: scenario.fieldImpact ? {
+      ...scenario.fieldImpact,
+      consumedFields: limited(scenario.fieldImpact.consumedFields, 24),
+      unprovenFields: limited(scenario.fieldImpact.unprovenFields, 24),
+      evidence: Array.isArray(scenario.fieldImpact.evidence)
+        ? scenario.fieldImpact.evidence.slice(0, 8).map(item => ({ ...item, evidence: limited(item.evidence, 2) }))
+        : scenario.fieldImpact.evidence
+    } : scenario.fieldImpact
+  }))
 }
 
 function compactApi(analysis, api) {
@@ -133,7 +144,7 @@ export async function apply(ctx) {
     }
   }), 'dsh-desktop-business: preview discovery route')
   const specs = [
-    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. It performs evidence analysis and pauses before any write. Follow analysisPlan.qualityGate: ready may proceed to confirmation, review requires focused evidence review, and insufficient must stop for target refinement. Use focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The default response contains bounded focused evidence; use business_scenario_workflow_status detail=full only when it is insufficient or ambiguous. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan only when allowed, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
+    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. It performs evidence analysis and pauses before any write. Follow analysisPlan.qualityGate: ready may proceed to confirmation, review requires focused evidence review, and insufficient must stop for target refinement. Review analysisPlan.fieldImpact before reusing an existing Scenario; source consumption is preflight evidence only and final iframe verification remains mandatory. Use focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The default response contains bounded focused evidence; use business_scenario_workflow_status detail=full only when it is insufficient or ambiguous. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan only when allowed, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
       routePath: { type: 'string', description: 'Optional exact target business hash route beginning with /. Omit when the intent or current preview should resolve it.' },
       targetPage: { type: 'string', description: 'Optional target business page name or route hint. This takes priority over the current preview page.' },
       query: { type: 'string', required: true, description: 'Business scenario intent used for evidence analysis.' },
