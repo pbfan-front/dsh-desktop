@@ -733,14 +733,19 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       batchCount: Math.ceil(rankedCandidates.length / preparationConcurrency),
       durationMs: Date.now() - preparationStartedAt
     }
+    const shortlistedCandidates = preparedCandidates.map(prepared => {
+      const scenarios = scenarioArray(prepared.config)
+      const searchable = `${prepared.candidate.apiUrl} ${prepared.config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
+      prepared.candidate.score += queryScore(searchable, 60, 180)
+      return { ...prepared, scenarios }
+    }).sort((left, right) => right.candidate.score - left.candidate.score).slice(0, 20)
+    candidatePreparation.fieldAnalysisCandidateCount = shortlistedCandidates.length
+    candidatePreparation.deferredCandidateCount = Math.max(0, preparedCandidates.length - shortlistedCandidates.length)
     const scenarioAnalysisStartedAt = performance.now()
-    for (const { candidate, relativePath, existing, generated, config } of preparedCandidates) {
-      const scenarios = scenarioArray(config)
+    for (const { candidate, relativePath, existing, generated, config, scenarios } of shortlistedCandidates) {
       const template = config.baseData || scenarios[0]?.data || {}
       const baseLeafFields = payloadLeafFields(template)
       fieldImpactAnalysis.baselineBuildCount += 1
-      const searchable = `${candidate.apiUrl} ${config.label || ''} ${scenarios.map(item => `${item.id} ${item.label || ''}`).join(' ')}`.toLowerCase()
-      candidate.score += queryScore(searchable, 60, 180)
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
       const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
       const fieldEvidenceCache = new Map()
@@ -783,7 +788,6 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         scenarios: scenarioSummaries })
     }
     apis.sort((a, b) => b.score - a.score)
-    apis.splice(20)
     if (!apis.length) throw new Error(`CodeIntell found no existing API mocks for ${route.path}`)
     const scenarioFieldAnalysisMs = roundDuration(performance.now() - scenarioAnalysisStartedAt)
     const rankingStartedAt = performance.now()

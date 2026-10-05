@@ -164,6 +164,12 @@ try {
     <= receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.batchCount,
     Math.ceil(receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount / 8))
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.fieldAnalysisCandidateCount,
+    receiveAccountAnalysis.analysisTimings.counts.rankedApis)
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.deferredCandidateCount,
+    receiveAccountAnalysis.analysisPlan.candidatePreparation.preparedCount
+      - receiveAccountAnalysis.analysisPlan.candidatePreparation.fieldAnalysisCandidateCount)
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.fieldAnalysisCandidateCount <= 20)
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.durationMs >= 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.strategy, 'single-pass-per-api-field-index')
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount > 0)
@@ -437,7 +443,14 @@ try {
   assert.ok(!(await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
   assert.equal((await (await get('/__desktop/state', { headers })).json()).profileId, '')
   assert.equal((await (await get('/__desktop/state', { headers: sessionAHeaders })).json()).profileId, '')
-  console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId, apiBindingsVerified: checked + 1, browserOutcomeVerified: true }))
+  console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId,
+    apiBindingsVerified: checked + 1, browserOutcomeVerified: true,
+    timingSamples: {
+      receiptInitial: receiptAnalysis.analysisTimings,
+      receiptReused: reusedReceiptAnalysis.analysisTimings,
+      receiptOtherSession: otherSessionReceiptAnalysis.analysisTimings,
+      receiveAccountInitial: receiveAccountAnalysis.analysisTimings
+    } }))
 } finally {
   if (child.exitCode === null) {
     await new Promise(done => {
