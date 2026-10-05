@@ -10,13 +10,15 @@ const workflowToken = randomBytes(32).toString('hex')
 const userRoot = await mkdtemp(resolve(tmpdir(), 'dsh-business-user-'))
 const legacyProfileDir = resolve(userRoot, 'src/baseTypes/api')
 const legacyMockDir = resolve(legacyProfileDir, 'refactor/queryMultiEnterpriseListII')
+const legacyMockFile = resolve(legacyMockDir, 'mock.json')
+const legacyMockConfig = { label: 'legacy', baseData: { status: '0', msg: 'ok', data: { array: [] } },
+  scenarios: [{ id: 'legacy_scenario', label: 'Legacy scenario', data: { status: '0', msg: 'ok', data: { array: [] } } }] }
 await mkdir(legacyMockDir, { recursive: true })
 await writeFile(resolve(legacyProfileDir, 'mock-profiles.json'), JSON.stringify({ version: 1, profiles: [{
   id: 'legacy_profile', label: 'Legacy profile', page: 'productCombine', routePath: '/credit/productCombine',
   apis: { '/refactor/queryMultiEnterpriseListII.json': 'legacy_scenario' }
 }] }))
-await writeFile(resolve(legacyMockDir, 'mock.json'), JSON.stringify({ label: 'legacy', baseData: { status: '0', msg: 'ok', data: { array: [] } },
-  scenarios: [{ id: 'legacy_scenario', label: 'Legacy scenario', data: { status: '0', msg: 'ok', data: { array: [] } } }] }))
+await writeFile(legacyMockFile, JSON.stringify(legacyMockConfig))
 const child = fork(resolve('build/business-runtime.mjs'), [resolve(process.argv[2] || 'build/business-package')], {
   execPath: resolve('node_modules/node/bin/node'), execArgv: [],
   env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
@@ -110,6 +112,8 @@ try {
   assert.ok(receiptAnalysis.apis.some(item => item.apiUrl === '/loanNbr/loanNbr.json'), JSON.stringify(receiptAnalysis).slice(0, 4000))
   assert.equal(receiptAnalysis.analysisPlan.strategy, 'existing-scenario-match', JSON.stringify(receiptAnalysis.analysisPlan))
   assert.ok(receiptAnalysis.analysisPlan.focusApiUrls.includes('/loanNbr/loanNbr.json'), JSON.stringify(receiptAnalysis.analysisPlan))
+  assert.equal(receiptAnalysis.analysisPlan.candidatePreparation.mockConfigCache.strategy, 'filesystem-metadata-validated')
+  assert.ok(receiptAnalysis.analysisPlan.candidatePreparation.mockConfigCache.misses > 0)
   assert.ok(receiptAnalysis.analysisPlan.existingScenarioMatches.some(item => item.apiUrl === '/loanNbr/loanNbr.json' && item.scenarioId === '正常借据可以提前结清'), JSON.stringify(receiptAnalysis.analysisPlan))
   assert.equal(receiptAnalysis.analysisPlan.confidence, 'low')
   assert.equal(receiptAnalysis.analysisPlan.qualityGate.level, 'review')
@@ -135,6 +139,8 @@ try {
     body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
   })).json()
   assert.equal(otherSessionReceiptAnalysis.analysisReuse.reused, false)
+  assert.ok(otherSessionReceiptAnalysis.analysisPlan.candidatePreparation.mockConfigCache.hits > 0)
+  assert.equal(otherSessionReceiptAnalysis.analysisPlan.candidatePreparation.mockConfigCache.misses, 0)
   const receiveAccountAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
     routePath: '/loan/receiveAcct', query: '收款账户 校验失败'
   }) })
@@ -285,11 +291,18 @@ try {
   assert.equal(firstMockResponse.status, 201, JSON.stringify(firstMockCreated))
   assert.equal(firstMockCreated.validation?.requests?.[0]?.scenarioId, 'generated_success')
   assert.equal((await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: firstMockCreated.operationId }) })).status, 200)
-  const unprovenImpactAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
+  const legacyCacheWarmResponse = await get('/__desktop/analyze-target', { method: 'POST', headers, body: JSON.stringify({
+    routePath: '/credit/productCombine', query: 'Legacy scenario'
+  }) })
+  assert.equal(legacyCacheWarmResponse.status, 200, await legacyCacheWarmResponse.text())
+  await writeFile(legacyMockFile, `${JSON.stringify(legacyMockConfig, null, 2)}\n`)
+  const unprovenImpactAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST',
+    headers: { ...headers, 'X-DSH-Session': 'cache-invalidation' }, body: JSON.stringify({
     routePath: '/credit/productCombine', query: 'Legacy scenario'
   }) })
   const unprovenImpactAnalysis = await unprovenImpactAnalysisResponse.json()
   assert.equal(unprovenImpactAnalysisResponse.status, 200, JSON.stringify(unprovenImpactAnalysis))
+  assert.ok(unprovenImpactAnalysis.analysisPlan.candidatePreparation.mockConfigCache.invalidations > 0)
   assert.equal(unprovenImpactAnalysis.analysisPlan.existingScenarioMatches[0]?.scenarioId, 'legacy_scenario')
   assert.equal(unprovenImpactAnalysis.analysisPlan.existingScenarioMatches[0]?.impactScore, 0)
   assert.ok(!unprovenImpactAnalysis.analysisPlan.existingScenarioMatches[0]?.reasons.includes('field-impact-consumed'))

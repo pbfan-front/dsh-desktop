@@ -214,9 +214,31 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const scenarioArray = config => Array.isArray(config?.scenarios)
     ? config.scenarios
     : Object.entries(config?.scenarios || {}).map(([id, value]) => ({ ...value, id }))
+  const mockConfigFileCache = new Map()
+  const mockConfigCacheStats = { hits: 0, misses: 0, invalidations: 0 }
+  const readCachedMockFile = async file => {
+    let metadata
+    try { metadata = await stat(file) } catch (error) {
+      if (error.code === 'ENOENT') { mockConfigFileCache.delete(file); return null }
+      throw error
+    }
+    const fingerprint = `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
+    const cached = mockConfigFileCache.get(file)
+    if (cached?.fingerprint === fingerprint) {
+      mockConfigCacheStats.hits += 1
+      return { file, config: cached.config }
+    }
+    if (cached) mockConfigCacheStats.invalidations += 1
+    const config = JSON.parse(await readFile(file, 'utf8'))
+    mockConfigCacheStats.misses += 1
+    mockConfigFileCache.set(file, { fingerprint, config })
+    while (mockConfigFileCache.size > 500) mockConfigFileCache.delete(mockConfigFileCache.keys().next().value)
+    return { file, config }
+  }
   const readMockConfig = async relativePath => {
     for (const file of [join(userRoot, relativePath), join(source, relativePath)]) {
-      try { return { file, config: JSON.parse(await readFile(file, 'utf8')) } } catch (error) { if (error.code !== 'ENOENT') throw error }
+      const result = await readCachedMockFile(file)
+      if (result) return result
     }
     return null
   }
@@ -726,6 +748,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
     const preparationConcurrency = 8
     const preparationStartedAt = Date.now()
+    const cacheStatsBeforePreparation = { ...mockConfigCacheStats }
     const preparedCandidates = []
     for (let index = 0; index < rankedCandidates.length; index += preparationConcurrency) {
       const preparedBatch = await Promise.all(rankedCandidates.slice(index, index + preparationConcurrency).map(async candidate => {
@@ -746,7 +769,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       candidateCount: rankedCandidates.length,
       preparedCount: preparedCandidates.length,
       batchCount: Math.ceil(rankedCandidates.length / preparationConcurrency),
-      durationMs: Date.now() - preparationStartedAt
+      durationMs: Date.now() - preparationStartedAt,
+      mockConfigCache: {
+        strategy: 'filesystem-metadata-validated',
+        hits: mockConfigCacheStats.hits - cacheStatsBeforePreparation.hits,
+        misses: mockConfigCacheStats.misses - cacheStatsBeforePreparation.misses,
+        invalidations: mockConfigCacheStats.invalidations - cacheStatsBeforePreparation.invalidations,
+        entries: mockConfigFileCache.size,
+        maxEntries: 500
+      }
     }
     const shortlistedCandidates = preparedCandidates.map(prepared => {
       const scenarios = scenarioArray(prepared.config)
