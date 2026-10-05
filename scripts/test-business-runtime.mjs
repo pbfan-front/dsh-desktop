@@ -144,12 +144,16 @@ try {
   assert.ok(receiveAccountMatch.consumedFieldCount > 0)
   assert.ok(receiveAccountMatch.reasons.includes('field-impact-consumed'))
   assert.equal(receiveAccountAnalysis.analysisPlan.scenarioRanking.strategy, 'intent-source-and-field-impact')
-  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.strategy, 'per-api-field-evidence-memoization')
+  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.strategy, 'single-pass-per-api-field-index')
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.cacheHitCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedFieldCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedOccurrenceCount > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedSourceScans,
-    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.cacheHitCount)
-  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceScanCount
+    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount
+      - receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount
     < receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount)
   assert.equal(receiveAccountAnalysis.analysisPlan.repositorySearch, 'not-needed')
   assert.equal(receiveAccountAnalysis.analysisPlan.qualityGate.level, 'ready')

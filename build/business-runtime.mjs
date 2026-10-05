@@ -423,20 +423,22 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const scenario = leafFieldValues(scenarioPayload)
     return [...new Set([...base.keys(), ...scenario.keys()].filter(field => JSON.stringify(base.get(field)) !== JSON.stringify(scenario.get(field))))].slice(0, 80)
   }
-  const fieldConsumptionEvidence = (field, sources) => {
-    const terminal = field.replace(/\[\]/g, '').split('.').at(-1)
-    if (!terminal || !/^[A-Za-z_$][\w$]*$/.test(terminal)) return []
-    const escaped = terminal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const pattern = new RegExp(`(?:\\.\\s*${escaped}\\b|\\[\\s*['\"]${escaped}['\"]\\s*\\]|\\b${escaped}\\s*:)`, 'g')
-    const matches = []
+  const fieldConsumptionIndex = sources => {
+    const evidenceByField = new Map()
+    const pattern = /(?:\.\s*([A-Za-z_$][\w$]*)\b|\[\s*['"]([A-Za-z_$][\w$]*)['"]\s*\]|\b([A-Za-z_$][\w$]*)\s*:)/g
+    let occurrenceCount = 0
     for (const sourceEntry of sources) {
       for (const match of sourceEntry.text.matchAll(pattern)) {
+        const field = match[1] || match[2] || match[3]
+        const matches = evidenceByField.get(field) || []
+        if (matches.length >= 3) continue
         matches.push({ file: sourceEntry.file, line: sourceEntry.text.slice(0, match.index).split('\n').length,
           syntax: match[0].trim(), source: 'bounded-source-field-consumption' })
-        if (matches.length >= 3) return matches
+        evidenceByField.set(field, matches)
+        occurrenceCount += 1
       }
     }
-    return matches
+    return { evidenceByField, occurrenceCount }
   }
   const routeTitle = route => String(route.title || route.comment || route.name || '').trim()
   const routeCandidate = route => ({ routePath: route.path, ...(routeTitle(route) ? { pageTitle: routeTitle(route) } : {}) })
@@ -686,7 +688,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!acceleration.usedCache && !acceleration.usedRecentRequests) acceleration.fallback = 'no-valid-hints'
     }
     const apis = []
-    const fieldImpactAnalysis = { strategy: 'per-api-field-evidence-memoization', lookupCount: 0, cacheHitCount: 0, sourceScanCount: 0 }
+    const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
+      sourceIndexBuildCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0 }
     for (const candidate of [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)) {
       let relativePath
       try { relativePath = apiMockRelative(candidate.apiUrl) } catch { continue }
@@ -703,14 +706,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
       const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
       const fieldEvidenceCache = new Map()
+      let consumptionIndex
+      const ensureConsumptionIndex = () => {
+        if (consumptionIndex) return consumptionIndex
+        consumptionIndex = fieldConsumptionIndex(consumerSources)
+        fieldImpactAnalysis.sourceIndexBuildCount += 1
+        fieldImpactAnalysis.indexedFieldCount += consumptionIndex.evidenceByField.size
+        fieldImpactAnalysis.indexedOccurrenceCount += consumptionIndex.occurrenceCount
+        return consumptionIndex
+      }
       const cachedFieldEvidence = field => {
         fieldImpactAnalysis.lookupCount += 1
         if (fieldEvidenceCache.has(field)) {
           fieldImpactAnalysis.cacheHitCount += 1
           return fieldEvidenceCache.get(field)
         }
-        fieldImpactAnalysis.sourceScanCount += 1
-        const fieldEvidence = fieldConsumptionEvidence(field, consumerSources)
+        const terminal = field.replace(/\[\]/g, '').split('.').at(-1)
+        const fieldEvidence = terminal && /^[A-Za-z_$][\w$]*$/.test(terminal)
+          ? ensureConsumptionIndex().evidenceByField.get(terminal) || []
+          : []
         fieldEvidenceCache.set(field, fieldEvidence)
         return fieldEvidence
       }
@@ -791,7 +805,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       },
       fieldImpactAnalysis: {
         ...fieldImpactAnalysis,
-        avoidedSourceScans: fieldImpactAnalysis.cacheHitCount
+        avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount)
       },
       repositorySearch: explicitApis.length || confidentExistingMatch ? 'not-needed' : 'only-if-focus-candidates-are-insufficient',
       guidance: existingScenarioMatches.length
