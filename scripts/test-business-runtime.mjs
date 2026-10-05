@@ -180,6 +180,7 @@ try {
     receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedFieldCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedOccurrenceCount > 0)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedLineCount > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedSourceScans,
     receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.lookupCount
       - receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount)

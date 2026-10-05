@@ -426,18 +426,32 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const evidenceByField = new Map()
     const pattern = /(?:\.\s*([A-Za-z_$][\w$]*)\b|\[\s*['"]([A-Za-z_$][\w$]*)['"]\s*\]|\b([A-Za-z_$][\w$]*)\s*:)/g
     let occurrenceCount = 0
+    let indexedLineCount = 0
     for (const sourceEntry of sources) {
+      const newlineOffsets = []
+      for (let offset = sourceEntry.text.indexOf('\n'); offset >= 0; offset = sourceEntry.text.indexOf('\n', offset + 1)) newlineOffsets.push(offset)
+      indexedLineCount += newlineOffsets.length + 1
+      const lineNumberAt = offset => {
+        let low = 0
+        let high = newlineOffsets.length
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2)
+          if (newlineOffsets[middle] < offset) low = middle + 1
+          else high = middle
+        }
+        return low + 1
+      }
       for (const match of sourceEntry.text.matchAll(pattern)) {
         const field = match[1] || match[2] || match[3]
         const matches = evidenceByField.get(field) || []
         if (matches.length >= 3) continue
-        matches.push({ file: sourceEntry.file, line: sourceEntry.text.slice(0, match.index).split('\n').length,
+        matches.push({ file: sourceEntry.file, line: lineNumberAt(match.index),
           syntax: match[0].trim(), source: 'bounded-source-field-consumption' })
         evidenceByField.set(field, matches)
         occurrenceCount += 1
       }
     }
-    return { evidenceByField, occurrenceCount }
+    return { evidenceByField, occurrenceCount, indexedLineCount }
   }
   const routeTitle = route => String(route.title || route.comment || route.name || '').trim()
   const routeCandidate = route => ({ routePath: route.path, ...(routeTitle(route) ? { pageTitle: routeTitle(route) } : {}) })
@@ -706,7 +720,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const accelerationHintsMs = roundDuration(performance.now() - accelerationStartedAt)
     const apis = []
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
-      sourceIndexBuildCount: 0, sourceIndexReuseCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0,
+      sourceIndexBuildCount: 0, sourceIndexReuseCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0, indexedLineCount: 0,
       baselineBuildCount: 0, scenarioDiffCount: 0 }
     const sharedConsumptionIndexes = new Map()
     const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
@@ -765,6 +779,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         fieldImpactAnalysis.sourceIndexBuildCount += 1
         fieldImpactAnalysis.indexedFieldCount += consumptionIndex.evidenceByField.size
         fieldImpactAnalysis.indexedOccurrenceCount += consumptionIndex.occurrenceCount
+        fieldImpactAnalysis.indexedLineCount += consumptionIndex.indexedLineCount
         return consumptionIndex
       }
       const cachedFieldEvidence = field => {
