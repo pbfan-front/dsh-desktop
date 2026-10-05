@@ -214,24 +214,56 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const scenarioArray = config => Array.isArray(config?.scenarios)
     ? config.scenarios
     : Object.entries(config?.scenarios || {}).map(([id, value]) => ({ ...value, id }))
+  const mockConfigCacheFile = join(userRoot, '.mock-config-cache.json')
   const mockConfigFileCache = new Map()
-  const mockConfigCacheStats = { hits: 0, misses: 0, invalidations: 0 }
+  const mockConfigCacheStats = { hits: 0, misses: 0, invalidations: 0, restoredHits: 0 }
+  let mockConfigCacheDirty = false
+  try {
+    const persisted = JSON.parse(await readFile(mockConfigCacheFile, 'utf8'))
+    if (persisted?.schemaVersion === 1 && persisted.projectId === manifest.projectId
+      && persisted.buildId === manifest.buildId && persisted.sourceRoot === source && Array.isArray(persisted.entries)) {
+      for (const entry of persisted.entries.slice(-500)) {
+        if (!plainObject(entry) || typeof entry.file !== 'string' || typeof entry.fingerprint !== 'string' || !plainObject(entry.config)) continue
+        mockConfigFileCache.set(entry.file, { fingerprint: entry.fingerprint, config: entry.config, restored: true })
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid Mock config cache: ${error.message}`)
+  }
+  let mockConfigCachePersistQueue = Promise.resolve()
+  const persistMockConfigCache = async () => {
+    if (mockConfigCacheDirty) {
+      mockConfigCacheDirty = false
+      const document = { schemaVersion: 1, projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source,
+        entries: [...mockConfigFileCache.entries()].map(([file, value]) => ({ file, fingerprint: value.fingerprint, config: value.config })) }
+      mockConfigCachePersistQueue = mockConfigCachePersistQueue.catch(() => {}).then(() => atomicJson(mockConfigCacheFile, document)).catch(error => {
+        mockConfigCacheDirty = true
+        console.warn(`[business-runtime] failed to persist Mock config cache: ${error.message}`)
+      })
+    }
+    await mockConfigCachePersistQueue
+  }
   const readCachedMockFile = async file => {
     let metadata
     try { metadata = await stat(file) } catch (error) {
-      if (error.code === 'ENOENT') { mockConfigFileCache.delete(file); return null }
+      if (error.code === 'ENOENT') {
+        if (mockConfigFileCache.delete(file)) mockConfigCacheDirty = true
+        return null
+      }
       throw error
     }
     const fingerprint = `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
     const cached = mockConfigFileCache.get(file)
     if (cached?.fingerprint === fingerprint) {
       mockConfigCacheStats.hits += 1
+      if (cached.restored) mockConfigCacheStats.restoredHits += 1
       return { file, config: cached.config }
     }
     if (cached) mockConfigCacheStats.invalidations += 1
     const config = JSON.parse(await readFile(file, 'utf8'))
     mockConfigCacheStats.misses += 1
-    mockConfigFileCache.set(file, { fingerprint, config })
+    mockConfigFileCache.set(file, { fingerprint, config, restored: false })
+    mockConfigCacheDirty = true
     while (mockConfigFileCache.size > 500) mockConfigFileCache.delete(mockConfigFileCache.keys().next().value)
     return { file, config }
   }
@@ -775,8 +807,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         hits: mockConfigCacheStats.hits - cacheStatsBeforePreparation.hits,
         misses: mockConfigCacheStats.misses - cacheStatsBeforePreparation.misses,
         invalidations: mockConfigCacheStats.invalidations - cacheStatsBeforePreparation.invalidations,
+        restoredHits: mockConfigCacheStats.restoredHits - cacheStatsBeforePreparation.restoredHits,
         entries: mockConfigFileCache.size,
-        maxEntries: 500
+        maxEntries: 500,
+        persistence: 'user-root-exact-fingerprint'
       }
     }
     const shortlistedCandidates = preparedCandidates.map(prepared => {
@@ -1036,6 +1070,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         .slice(0, 100)
       await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: Object.fromEntries(entries) })
     }
+    void persistMockConfigCache()
     result.analysisTimings = {
       reused: false,
       codeIntellRefreshMs,
@@ -1592,6 +1627,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       process.off('message', handleWorkflowResponse)
       for (const pending of workflowRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('Business runtime is stopping')) }
       workflowRequests.clear()
+      await persistMockConfigCache()
       server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close()
     } }
 }

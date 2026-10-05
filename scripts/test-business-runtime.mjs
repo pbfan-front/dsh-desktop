@@ -2,12 +2,28 @@ import { fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 const token = randomBytes(32).toString('hex')
 const workflowToken = randomBytes(32).toString('hex')
 const userRoot = await mkdtemp(resolve(tmpdir(), 'dsh-business-user-'))
+const packageRoot = resolve(process.argv[2] || 'build/business-package')
+const packageManifest = JSON.parse(await readFile(resolve(packageRoot, 'manifest.json'), 'utf8'))
+const packageSourceRoot = await realpath(resolve(packageRoot, packageManifest.sourceRoot))
+const persistedMockFile = resolve(packageSourceRoot, 'src/baseTypes/api/withdrawal/inputReceiveAcctCheck/mock.json')
+const persistedMockMetadata = await stat(persistedMockFile)
+await writeFile(resolve(userRoot, '.mock-config-cache.json'), JSON.stringify({
+  schemaVersion: 1,
+  projectId: packageManifest.projectId,
+  buildId: packageManifest.buildId,
+  sourceRoot: packageSourceRoot,
+  entries: [{
+    file: persistedMockFile,
+    fingerprint: `${persistedMockMetadata.dev}:${persistedMockMetadata.ino}:${persistedMockMetadata.size}:${persistedMockMetadata.mtimeMs}:${persistedMockMetadata.ctimeMs}`,
+    config: JSON.parse(await readFile(persistedMockFile, 'utf8'))
+  }]
+}))
 const legacyProfileDir = resolve(userRoot, 'src/baseTypes/api')
 const legacyMockDir = resolve(legacyProfileDir, 'refactor/queryMultiEnterpriseListII')
 const legacyMockFile = resolve(legacyMockDir, 'mock.json')
@@ -19,7 +35,7 @@ await writeFile(resolve(legacyProfileDir, 'mock-profiles.json'), JSON.stringify(
   apis: { '/refactor/queryMultiEnterpriseListII.json': 'legacy_scenario' }
 }] }))
 await writeFile(legacyMockFile, JSON.stringify(legacyMockConfig))
-const child = fork(resolve('build/business-runtime.mjs'), [resolve(process.argv[2] || 'build/business-package')], {
+const child = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
   execPath: resolve('node_modules/node/bin/node'), execArgv: [],
   env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
 })
@@ -163,6 +179,8 @@ try {
   assert.ok(receiveAccountMatch.reasons.includes('field-impact-consumed'))
   assert.equal(receiveAccountAnalysis.analysisPlan.scenarioRanking.strategy, 'intent-source-and-field-impact')
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.strategy, 'bounded-parallel-read')
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.persistence, 'user-root-exact-fingerprint')
+  assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.restoredHits > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.concurrency, 8)
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.preparedCount > 0)
@@ -452,6 +470,12 @@ try {
   assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'blocked'))
   assert.ok(auditEntries.some(item => item.mode === 'legacy' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
   assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
+  const persistedMockCache = JSON.parse(await readFile(resolve(userRoot, '.mock-config-cache.json'), 'utf8'))
+  assert.equal(persistedMockCache.schemaVersion, 1)
+  assert.equal(persistedMockCache.projectId, context.projectId)
+  assert.equal(persistedMockCache.buildId, context.buildId)
+  assert.ok(persistedMockCache.entries.length > 1)
+  assert.ok(persistedMockCache.entries.length <= 500)
   const rolledBack = await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: imported.operationId }) })
   assert.equal(rolledBack.status, 200)
   const rolledBackResult = await rolledBack.json()
@@ -460,14 +484,47 @@ try {
   assert.ok(!(await (await get('/__desktop/profiles', { headers })).json()).profiles.some(item => item.id === 'p1_user_test'))
   assert.equal((await (await get('/__desktop/state', { headers })).json()).profileId, '')
   assert.equal((await (await get('/__desktop/state', { headers: sessionAHeaders })).json()).profileId, '')
-  console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId,
-    apiBindingsVerified: checked + 1, browserOutcomeVerified: true,
-    timingSamples: {
-      receiptInitial: receiptAnalysis.analysisTimings,
-      receiptReused: reusedReceiptAnalysis.analysisTimings,
-      receiptOtherSession: otherSessionReceiptAnalysis.analysisTimings,
-      receiveAccountInitial: receiveAccountAnalysis.analysisTimings
-    } }))
+  await new Promise(done => {
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
+    child.once('exit', () => { clearTimeout(timer); done() }); child.kill('SIGTERM')
+  })
+  const restartedChild = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
+    execPath: resolve('node_modules/node/bin/node'), execArgv: [],
+    env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc']
+  })
+  restartedChild.stderr.on('data', data => process.stderr.write(data))
+  try {
+    const restartedReady = await new Promise((done, reject) => {
+      const timer = setTimeout(() => reject(new Error('Restart timeout')), 60_000)
+      restartedChild.once('message', value => { clearTimeout(timer); done(value) })
+      restartedChild.once('error', error => { clearTimeout(timer); reject(error) })
+      restartedChild.once('exit', code => { clearTimeout(timer); reject(new Error(`Restart exited ${code}`)) })
+    })
+    const restartedResponse = await fetch(new URL('/__desktop/analyze-target', restartedReady.origin), {
+      method: 'POST', headers: workflowHeaders,
+      body: JSON.stringify({ routePath: '/loan/receiveAcct', query: '收款账户 校验失败' })
+    })
+    const restartedAnalysis = await restartedResponse.json()
+    assert.equal(restartedResponse.status, 200, JSON.stringify(restartedAnalysis))
+    assert.ok(restartedAnalysis.analysisPlan.candidatePreparation.mockConfigCache.restoredHits > 50)
+    assert.equal(restartedAnalysis.analysisPlan.candidatePreparation.mockConfigCache.misses, 0)
+    assert.equal(restartedAnalysis.analysisPlan.existingScenarioMatches[0]?.scenarioId, '失败返回')
+    console.log(JSON.stringify({ ok: true, buildId: context.buildId, profileId: created.profileId,
+      apiBindingsVerified: checked + 1, browserOutcomeVerified: true,
+      timingSamples: {
+        receiptInitial: receiptAnalysis.analysisTimings,
+        receiptReused: reusedReceiptAnalysis.analysisTimings,
+        receiptOtherSession: otherSessionReceiptAnalysis.analysisTimings,
+        receiveAccountInitial: receiveAccountAnalysis.analysisTimings,
+        receiveAccountAfterRestart: restartedAnalysis.analysisTimings
+      } }))
+  } finally {
+    if (restartedChild.exitCode === null) await new Promise(done => {
+      const timer = setTimeout(() => restartedChild.kill('SIGKILL'), 5000)
+      restartedChild.once('exit', () => { clearTimeout(timer); done() }); restartedChild.kill('SIGTERM')
+    })
+  }
 } finally {
   if (child.exitCode === null) {
     await new Promise(done => {
