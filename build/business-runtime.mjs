@@ -241,6 +241,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid Mock config cache: ${error.message}`)
   }
   let mockConfigCachePersistQueue = Promise.resolve()
+  let mockConfigCachePersistTimer
   const persistMockConfigCache = async () => {
     if (mockConfigCacheDirty) {
       mockConfigCacheDirty = false
@@ -252,6 +253,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       })
     }
     await mockConfigCachePersistQueue
+  }
+  const scheduleMockConfigCachePersistence = () => {
+    if (mockConfigCachePersistTimer) return
+    mockConfigCachePersistTimer = setTimeout(() => {
+      mockConfigCachePersistTimer = undefined
+      void persistMockConfigCache()
+    }, 500)
+    mockConfigCachePersistTimer.unref()
   }
   const readCachedMockFile = async file => {
     let metadata
@@ -862,7 +871,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         restoredHits: mockConfigCacheStats.restoredHits - cacheStatsBeforePreparation.restoredHits,
         entries: mockConfigFileCache.size,
         maxEntries: 500,
-        persistence: 'user-root-exact-fingerprint'
+        persistence: 'user-root-exact-fingerprint',
+        persistenceScheduling: 'debounced-background-with-close-flush',
+        persistenceDelayMs: 500
       }
     }
     const shortlistedCandidates = preparedCandidates.map(prepared => {
@@ -1142,7 +1153,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         .slice(0, 100)
       await atomicJson(analysisCacheFile, { schemaVersion: 1, entries: Object.fromEntries(entries) })
     }
-    void persistMockConfigCache()
+    scheduleMockConfigCachePersistence()
     result.analysisTimings = {
       reused: false,
       codeIntellRefreshMs,
@@ -1699,6 +1710,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       process.off('message', handleWorkflowResponse)
       for (const pending of workflowRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('Business runtime is stopping')) }
       workflowRequests.clear()
+      if (mockConfigCachePersistTimer) {
+        clearTimeout(mockConfigCachePersistTimer)
+        mockConfigCachePersistTimer = undefined
+      }
       await persistMockConfigCache()
       server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close()
     } }

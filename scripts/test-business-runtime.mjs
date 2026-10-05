@@ -198,6 +198,9 @@ try {
     receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceLookupCount
       - receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.sourceReferenceScanCount)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.persistence, 'user-root-exact-fingerprint')
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.persistenceScheduling,
+    'debounced-background-with-close-flush')
+  assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.persistenceDelayMs, 500)
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.mockConfigCache.restoredHits > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.concurrency, 8)
   assert.ok(receiveAccountAnalysis.analysisPlan.candidatePreparation.candidateCount > 0)
@@ -504,12 +507,6 @@ try {
   assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'blocked'))
   assert.ok(auditEntries.some(item => item.mode === 'legacy' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
   assert.ok(auditEntries.some(item => item.mode === 'workflow' && item.action === '/__desktop/analyze-target' && item.outcome === 'allowed'))
-  const persistedMockCache = JSON.parse(await readFile(resolve(userRoot, '.mock-config-cache.json'), 'utf8'))
-  assert.equal(persistedMockCache.schemaVersion, 1)
-  assert.equal(persistedMockCache.projectId, context.projectId)
-  assert.equal(persistedMockCache.buildId, context.buildId)
-  assert.ok(persistedMockCache.entries.length > 1)
-  assert.ok(persistedMockCache.entries.length <= 500)
   const rolledBack = await get('/__desktop/rollback', { method: 'POST', headers, body: JSON.stringify({ operationId: imported.operationId }) })
   assert.equal(rolledBack.status, 200)
   const rolledBackResult = await rolledBack.json()
@@ -522,6 +519,12 @@ try {
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
     child.once('exit', () => { clearTimeout(timer); done() }); child.kill('SIGTERM')
   })
+  const persistedMockCache = JSON.parse(await readFile(resolve(userRoot, '.mock-config-cache.json'), 'utf8'))
+  assert.equal(persistedMockCache.schemaVersion, 1)
+  assert.equal(persistedMockCache.projectId, context.projectId)
+  assert.equal(persistedMockCache.buildId, context.buildId)
+  assert.ok(persistedMockCache.entries.length > 1)
+  assert.ok(persistedMockCache.entries.length <= 500)
   const restartedChild = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
     execPath: resolve('node_modules/node/bin/node'), execArgv: [],
     env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot },
