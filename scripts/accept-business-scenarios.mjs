@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 
 const packageRoot = resolve(process.argv[2] || 'build/business-package')
 const sourceRoot = join(packageRoot, 'source')
@@ -201,9 +202,15 @@ try {
 
   const results = []
   for (const item of cases) {
+    const caseStartedAt = performance.now()
+    const timings = {}
+    const measure = async (name, task) => {
+      const startedAt = performance.now()
+      try { return await task() } finally { timings[name] = Number((performance.now() - startedAt).toFixed(2)) }
+    }
     let stage = 'ROUTE_EVIDENCE'
     try {
-      const analyzed = await post('/__desktop/analyze-target', { routePath: item.routePath, query: item.query, apiUrls: [item.apiUrl] })
+      const analyzed = await measure('analyzeMs', () => post('/__desktop/analyze-target', { routePath: item.routePath, query: item.query, apiUrls: [item.apiUrl] }))
       assert.equal(analyzed.response.status, 200, JSON.stringify(analyzed.body))
       const apiEvidence = analyzed.body.apis.find(api => api.apiUrl === item.apiUrl)
       assert.ok(apiEvidence, `CodeIntell did not identify ${item.apiUrl}\n${JSON.stringify(analyzed.body).slice(0, 8000)}`)
@@ -211,18 +218,20 @@ try {
 
       stage = 'INTERFACE_HIT'
       const data = await loadScenario(item.relativePath, item.baselineId)
-      const created = await post('/__desktop/create-profile', {
+      const created = await measure('createMs', () => post('/__desktop/create-profile', {
         evidenceId: analyzed.body.evidenceId,
         profile: { id: item.profileId, label: item.query, branchLabel: item.query, routePath: item.routePath, page: item.page },
         scenarios: [{ id: item.scenarioId, apiUrl: item.apiUrl, label: item.query, data }]
-      })
+      }))
       assert.equal(created.response.status, 201, JSON.stringify(created.body))
       assert.equal(created.body.validation?.ok, true)
 
-      const applied = await post('/__desktop/apply', { profileId: item.profileId })
+      const applied = await measure('applyMs', () => post('/__desktop/apply', { profileId: item.profileId }))
       assert.equal(applied.response.status, 200, JSON.stringify(applied.body))
-      const mockResponse = await fetch(`${ready.origin}/mock${item.apiUrl}`, { method: 'POST', body: '{}' })
-      const payload = await mockResponse.json()
+      const { mockResponse, payload } = await measure('mockRequestMs', async () => {
+        const mockResponse = await fetch(`${ready.origin}/mock${item.apiUrl}`, { method: 'POST', body: '{}' })
+        return { mockResponse, payload: await mockResponse.json() }
+      })
       assert.equal(mockResponse.headers.get('x-local-mock-profile'), item.profileId)
       assert.equal(mockResponse.headers.get('x-local-mock-scenario'), item.scenarioId)
 
@@ -230,16 +239,25 @@ try {
       const businessFields = item.assertPayload(payload)
 
       stage = 'ROLLBACK'
-      const rolledBack = await post('/__desktop/rollback', { operationId: created.body.operationId })
+      const rolledBack = await measure('rollbackMs', () => post('/__desktop/rollback', { operationId: created.body.operationId }))
       assert.equal(rolledBack.response.status, 200, JSON.stringify(rolledBack.body))
       results.push({ name: item.name, routePath: item.routePath, apiUrl: item.apiUrl,
-        evidence: apiEvidence.evidence, profileId: item.profileId, scenarioId: item.scenarioId, businessFields })
+        evidence: apiEvidence.evidence, profileId: item.profileId, scenarioId: item.scenarioId, businessFields,
+        timings: { ...timings, totalMs: Number((performance.now() - caseStartedAt).toFixed(2)) } })
     } catch (error) {
       error.message = `[${stage}] ${item.name}: ${error.message}`
       throw error
     }
   }
-  console.log(JSON.stringify({ ok: true, buildId: ready.buildId, cases: results }, null, 2))
+  console.log(JSON.stringify({
+    ok: true,
+    buildId: ready.buildId,
+    coverage: {
+      routeEvidence: true, mockScenarioHit: true, payloadFields: true,
+      agentIntentResolution: false, desktopIframeRendering: false, visualOutcome: false
+    },
+    cases: results
+  }, null, 2))
 } finally {
   if (child.exitCode === null) {
     await new Promise(done => {
