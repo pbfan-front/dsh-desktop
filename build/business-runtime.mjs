@@ -293,14 +293,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const cached = sourceTextFileCache.get(file)
     if (cached?.fingerprint === fingerprint) {
       sourceTextCacheStats.hits += 1
-      return cached.text
+      return { text: cached.text, fingerprint }
     }
     if (cached) sourceTextCacheStats.invalidations += 1
     const text = await readFile(file, 'utf8')
     sourceTextCacheStats.misses += 1
     sourceTextFileCache.set(file, { fingerprint, text })
     while (sourceTextFileCache.size > 300) sourceTextFileCache.delete(sourceTextFileCache.keys().next().value)
-    return text
+    return { text, fingerprint }
   }
   const typeFilesForMock = relativePath => {
     const directory = relativePath.replace(/\/mock\.json$/, '')
@@ -535,6 +535,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return { evidenceByField, occurrenceCount, indexedLineCount }
   }
+  const fieldConsumptionIndexCache = new Map()
   const routeTitle = route => String(route.title || route.comment || route.name || '').trim()
   const routeCandidate = route => ({ routePath: route.path, ...(routeTitle(route) ? { pageTitle: routeTitle(route) } : {}) })
   const normalizedHint = value => String(value || '').toLowerCase().replace(/[\s/\\?&#=_-]+/gu, '')
@@ -707,7 +708,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const relevantSource = []
     for (let index = 0; index < relevantFileList.length; index += sourceReadConcurrency) {
       const batch = await Promise.all(relevantFileList.slice(index, index + sourceReadConcurrency).map(async file => {
-        try { return { file, text: await readCachedSourceText(file) } } catch { return undefined }
+        try {
+          const cachedSource = await readCachedSourceText(file)
+          return { file, text: cachedSource.text, fingerprint: cachedSource.fingerprint }
+        } catch { return undefined }
       }))
       relevantSource.push(...batch.filter(Boolean))
     }
@@ -823,7 +827,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const apis = []
     const fieldImpactAnalysis = { strategy: 'single-pass-per-api-field-index', lookupCount: 0, cacheHitCount: 0,
       sourceIndexBuildCount: 0, sourceIndexReuseCount: 0, indexedFieldCount: 0, indexedOccurrenceCount: 0, indexedLineCount: 0,
-      baselineBuildCount: 0, scenarioDiffCount: 0 }
+      runtimeSourceIndexReuseCount: 0, baselineBuildCount: 0, scenarioDiffCount: 0 }
     const sharedConsumptionIndexes = new Map()
     const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
     const preparationConcurrency = 8
@@ -876,7 +880,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       fieldImpactAnalysis.baselineBuildCount += 1
       const consumerFiles = new Set([componentFile, ...candidate.evidence.map(item => item.file).filter(Boolean)])
       const consumerSources = relevantSource.filter(item => consumerFiles.has(item.file))
-      const consumerSourceKey = consumerSources.map(item => item.file).sort().join('\u0000')
+      const consumerSourceKey = consumerSources.map(item => `${item.file}\u0001${item.fingerprint}`).sort().join('\u0000')
       const fieldEvidenceCache = new Map()
       let consumptionIndex
       const ensureConsumptionIndex = () => {
@@ -887,8 +891,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           consumptionIndex = sharedIndex
           return consumptionIndex
         }
+        const runtimeCachedIndex = fieldConsumptionIndexCache.get(consumerSourceKey)
+        if (runtimeCachedIndex) {
+          fieldImpactAnalysis.runtimeSourceIndexReuseCount += 1
+          consumptionIndex = runtimeCachedIndex
+          sharedConsumptionIndexes.set(consumerSourceKey, consumptionIndex)
+          return consumptionIndex
+        }
         consumptionIndex = fieldConsumptionIndex(consumerSources)
         sharedConsumptionIndexes.set(consumerSourceKey, consumptionIndex)
+        fieldConsumptionIndexCache.set(consumerSourceKey, consumptionIndex)
+        while (fieldConsumptionIndexCache.size > 100) fieldConsumptionIndexCache.delete(fieldConsumptionIndexCache.keys().next().value)
         fieldImpactAnalysis.sourceIndexBuildCount += 1
         fieldImpactAnalysis.indexedFieldCount += consumptionIndex.evidenceByField.size
         fieldImpactAnalysis.indexedOccurrenceCount += consumptionIndex.occurrenceCount
@@ -988,7 +1001,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       fieldImpactAnalysis: {
         ...fieldImpactAnalysis,
         avoidedSourceScans: Math.max(0, fieldImpactAnalysis.lookupCount - fieldImpactAnalysis.sourceIndexBuildCount),
-        avoidedSourceIndexBuilds: fieldImpactAnalysis.sourceIndexReuseCount,
+        avoidedSourceIndexBuilds: fieldImpactAnalysis.sourceIndexReuseCount + fieldImpactAnalysis.runtimeSourceIndexReuseCount,
+        runtimeSourceIndexCache: { entries: fieldConsumptionIndexCache.size, maxEntries: 100,
+          validation: 'source-file-metadata-fingerprint' },
         avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
       candidatePreparation,

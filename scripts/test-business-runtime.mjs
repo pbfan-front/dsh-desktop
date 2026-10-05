@@ -219,7 +219,12 @@ try {
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.avoidedSourceIndexBuilds,
-    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount)
+    receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexReuseCount
+      + receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.runtimeSourceIndexReuseCount)
+  assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.runtimeSourceIndexCache.entries > 0)
+  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.runtimeSourceIndexCache.maxEntries, 100)
+  assert.equal(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.runtimeSourceIndexCache.validation,
+    'source-file-metadata-fingerprint')
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedFieldCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedOccurrenceCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.indexedLineCount > 0)
@@ -256,6 +261,8 @@ try {
   assert.equal(repeatedReceiveAccountAnalysis.analysisReuse.reused, false)
   assert.ok(repeatedReceiveAccountAnalysis.analysisPlan.sourceReadPlan.hits > 0)
   assert.equal(repeatedReceiveAccountAnalysis.analysisPlan.sourceReadPlan.misses, 0)
+  assert.ok(repeatedReceiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.runtimeSourceIndexReuseCount > 0)
+  assert.equal(repeatedReceiveAccountAnalysis.analysisPlan.fieldImpactAnalysis.sourceIndexBuildCount, 0)
   assert.equal(repeatedReceiveAccountAnalysis.analysisPlan.existingScenarioMatches[0]?.scenarioId, '失败返回')
   assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.kind, 'reuse-existing-scenario', JSON.stringify(receiveAccountAnalysis.analysisPlan))
   assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.requiresConfirmation, true)
@@ -544,6 +551,7 @@ try {
         receiptReused: reusedReceiptAnalysis.analysisTimings,
         receiptOtherSession: otherSessionReceiptAnalysis.analysisTimings,
         receiveAccountInitial: receiveAccountAnalysis.analysisTimings,
+        receiveAccountOtherSession: repeatedReceiveAccountAnalysis.analysisTimings,
         receiveAccountAfterRestart: restartedAnalysis.analysisTimings
       } }))
   } finally {
