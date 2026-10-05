@@ -179,6 +179,15 @@ try {
   assert.ok(receiveAccountMatch.reasons.includes('field-impact-consumed'))
   assert.equal(receiveAccountAnalysis.analysisPlan.scenarioRanking.strategy, 'intent-source-and-field-impact')
   assert.equal(receiveAccountAnalysis.analysisPlan.candidatePreparation.strategy, 'bounded-parallel-read')
+  assert.equal(receiveAccountAnalysis.analysisPlan.sourceReadPlan.strategy, 'bounded-parallel-metadata-validated-cache')
+  assert.equal(receiveAccountAnalysis.analysisPlan.sourceReadPlan.concurrency, 8)
+  assert.equal(receiveAccountAnalysis.analysisPlan.sourceReadPlan.requestedCount,
+    receiveAccountAnalysis.analysisTimings.counts.relevantSourceFiles)
+  assert.equal(receiveAccountAnalysis.analysisPlan.sourceReadPlan.readCount,
+    receiveAccountAnalysis.analysisPlan.sourceReadPlan.requestedCount)
+  assert.equal(receiveAccountAnalysis.analysisPlan.sourceReadPlan.batchCount,
+    Math.ceil(receiveAccountAnalysis.analysisPlan.sourceReadPlan.requestedCount / 8))
+  assert.ok(receiveAccountAnalysis.analysisPlan.sourceReadPlan.misses > 0)
   assert.equal(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.strategy, 'lifecycle-derived-callers-with-request-symbol-memo')
   assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.fileApiEntryCount > 0)
   assert.ok(receiveAccountAnalysis.analysisPlan.evidenceDiscoveryIndex.apiCallerEntryCount > 0)
@@ -239,6 +248,15 @@ try {
   const receiveAccountApi = receiveAccountAnalysis.apis.find(item => item.apiUrl === '/withdrawal/inputReceiveAcctCheck.json')
   const receiveAccountFailureScenario = receiveAccountApi.scenarios.find(item => item.id === '失败返回')
   assert.ok(receiveAccountFailureScenario.fieldImpact.evidence.some(item => item.evidence.some(value => value.source === 'bounded-source-field-consumption')))
+  const repeatedReceiveAccountAnalysis = await (await get('/__desktop/analyze-target', {
+    method: 'POST', headers: { ...headers, 'X-DSH-Session': 'source-cache-repeat' }, body: JSON.stringify({
+      routePath: '/loan/receiveAcct', query: '收款账户 校验失败'
+    })
+  })).json()
+  assert.equal(repeatedReceiveAccountAnalysis.analysisReuse.reused, false)
+  assert.ok(repeatedReceiveAccountAnalysis.analysisPlan.sourceReadPlan.hits > 0)
+  assert.equal(repeatedReceiveAccountAnalysis.analysisPlan.sourceReadPlan.misses, 0)
+  assert.equal(repeatedReceiveAccountAnalysis.analysisPlan.existingScenarioMatches[0]?.scenarioId, '失败返回')
   assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.kind, 'reuse-existing-scenario', JSON.stringify(receiveAccountAnalysis.analysisPlan))
   assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.requiresConfirmation, true)
   assert.equal(receiveAccountAnalysis.analysisPlan.suggestedPlan?.scenarios?.[0]?.sourceScenarioId, '失败返回')

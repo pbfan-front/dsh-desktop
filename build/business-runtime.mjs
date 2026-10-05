@@ -284,6 +284,24 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return null
   }
+  const sourceTextFileCache = new Map()
+  const sourceTextCacheStats = { hits: 0, misses: 0, invalidations: 0 }
+  const readCachedSourceText = async relativePath => {
+    const file = join(source, relativePath)
+    const metadata = await stat(file)
+    const fingerprint = `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
+    const cached = sourceTextFileCache.get(file)
+    if (cached?.fingerprint === fingerprint) {
+      sourceTextCacheStats.hits += 1
+      return cached.text
+    }
+    if (cached) sourceTextCacheStats.invalidations += 1
+    const text = await readFile(file, 'utf8')
+    sourceTextCacheStats.misses += 1
+    sourceTextFileCache.set(file, { fingerprint, text })
+    while (sourceTextFileCache.size > 300) sourceTextFileCache.delete(sourceTextFileCache.keys().next().value)
+    return text
+  }
   const typeFilesForMock = relativePath => {
     const directory = relativePath.replace(/\/mock\.json$/, '')
     return { request: `${directory}/Req.ts`, response: `${directory}/Rsp.ts` }
@@ -682,12 +700,30 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         else if (current.evidence.length < 5) current.evidence.push({ file, via: binding.via || '', source: 'codeIntell.fileToApis' })
       }
     }
-    const relevantSource = []
+    const sourceReadConcurrency = 8
     const sourceReadStartedAt = performance.now()
-    for (const file of relevantFiles) {
-      try { relevantSource.push({ file, text: await readFile(join(source, file), 'utf8') }) } catch {}
+    const sourceCacheStatsBeforeRead = { ...sourceTextCacheStats }
+    const relevantFileList = [...relevantFiles]
+    const relevantSource = []
+    for (let index = 0; index < relevantFileList.length; index += sourceReadConcurrency) {
+      const batch = await Promise.all(relevantFileList.slice(index, index + sourceReadConcurrency).map(async file => {
+        try { return { file, text: await readCachedSourceText(file) } } catch { return undefined }
+      }))
+      relevantSource.push(...batch.filter(Boolean))
     }
     const sourceReadMs = roundDuration(performance.now() - sourceReadStartedAt)
+    const sourceReadPlan = {
+      strategy: 'bounded-parallel-metadata-validated-cache',
+      concurrency: sourceReadConcurrency,
+      requestedCount: relevantFileList.length,
+      readCount: relevantSource.length,
+      batchCount: Math.ceil(relevantFileList.length / sourceReadConcurrency),
+      hits: sourceTextCacheStats.hits - sourceCacheStatsBeforeRead.hits,
+      misses: sourceTextCacheStats.misses - sourceCacheStatsBeforeRead.misses,
+      invalidations: sourceTextCacheStats.invalidations - sourceCacheStatsBeforeRead.invalidations,
+      entries: sourceTextFileCache.size,
+      maxEntries: 300
+    }
     const sourceReferenceBySymbol = new Map()
     let sourceReferenceLookupCount = 0
     let sourceReferenceScanCount = 0
@@ -956,6 +992,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         avoidedBaselineTraversals: Math.max(0, fieldImpactAnalysis.scenarioDiffCount - fieldImpactAnalysis.baselineBuildCount)
       },
       candidatePreparation,
+      sourceReadPlan,
       evidenceDiscoveryIndex: {
         strategy: 'lifecycle-derived-callers-with-request-symbol-memo',
         fileApiEntryCount: codeIntellDerived.fileApiEntries.length,
