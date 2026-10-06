@@ -114,4 +114,6 @@ Agent 插件现提供 `business_start_scenario_workflow`、`business_resume_scen
 
 目标解析遇到多个同名页面时，业务服务返回带路由和页面标题的结构化候选，工作流将其保存在失败步骤中。Agent 必须先把候选展示给用户；只有用户明确选择后，才能调用 `business_retry_scenario_workflow(runId, selectedRoutePath, confirmedByUser=true)`。Desktop 只接受该运行保存的候选路由，错误或未确认的选择不改变运行状态。有效选择在同一运行中重试目标解析，然后进入尚未开始的源码分析，不创建新运行或提前写入 Profile。其他可重试失败仍可不带选择参数按原方式重试。
 
+质量门为 `review` 时，分析结果附带有界的 `analysisPlan.reviewPacket`：列出置信度缺口、最多三个现有 Scenario 的意图匹配与字段消费对比、总分拆解，以及少量源码位置证据。`analysisPlan.fieldImpact.candidateOnly=true` 表示第一候选虽有字段消费证据，但尚不足以自动复用；不再把这类证据误写为 `unproven`。`strongestScenarioHasFieldImpact=false` 也可能只是因为缺少唯一高置信匹配，不能据此否认候选已有字段证据。未证实字段只是“在有界源码范围内未找到消费”，不等于页面必需或完全未使用。Agent 应在方案确认前核对实际 Mock 值与用户意图，不得仅凭名称或总分推荐复用。现有质量门阈值及最终 iframe/真实请求验证保持不变。
+
 业务插件可选地在 manifest 中声明 `scenarioSemanticRules`。每条规则使用精确路由、精确意图和 API，指定直接 Mock 数据的标量字段断言及可接受的来源 Scenario ID；不执行插件脚本或正则。命中规则会随分析结果送给 Agent 供确认方案时审阅。Desktop 在接受 `confirm-plan` 输入前重新按当前插件规则校验，失败时保持检查点等待而不写 Profile；创建步骤重复校验作为防线。未声明或未精确匹配的意图不套用业务猜测，最终页面与真实请求验证仍不可省略。

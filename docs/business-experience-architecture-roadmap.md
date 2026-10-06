@@ -330,6 +330,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | BEA-042 | P1 | 插件声明的业务语义方案预检 | 已完成，自动化与真实 Desktop Runtime 接口验收通过 | Codex | - | 业务插件可声明精确意图、路由、API 与字段/来源 Scenario 断言；工作流在确认 Checkpoint 接受输入前校验，不匹配时保留等待状态并允许修正，创建步骤再做同一检查以防绕过。规则只匹配插件声明的精确意图，不从一般自然语言臆断字段语义；最终 iframe 验证仍必需 |
 | BEA-043 | P1 | 正常借据真实页面端到端语义验收 | 已完成明确路由的无头浏览器样本；可见 GUI 与自然语言目标消歧未覆盖 | Codex | - | 隔离会话真实创建、应用 Mock Profile，以 Chrome 加载 Desktop 业务预览和实际 iframe，验证正常借据页面、真实 Scenario 请求、路由及禁止文案；工作流与只读业务语义评估均通过，最后回滚 Profile。自然语言不提供路由时得到多路由歧义，不能计为意图解析成功 |
 | BEA-044 | P1 | 多页面同名目标消歧 | 已完成，真实 Desktop Agent 对话验收通过 | Codex | - | 歧义错误保存结构化候选路由与页面标题；Agent 展示候选并等待用户明确选择。重试仅接受该运行的候选及用户确认标记，在原运行中重新解析选定路由，随后才开始源码分析；无确认或非法候选不改变运行。无需更改插件工作流拓扑，已有完成步骤不重放 |
+| BEA-045 | P1 | Review 质量门证据包与候选区分 | 已实现，真实 Desktop 对话与 Runtime 验收通过 | Codex | - | `review` 结果附带有界候选对比、总分拆解、缺口解释与源码字段消费位置。第一候选的已知字段证据不再因自动复用置信度不足被误报为 `unproven`，改用 `candidateOnly` 明确其尚未经语义确认；不改变质量门阈值，不自动通过方案或写入 Profile |
 
 ## 8. 更新记录
 
@@ -372,6 +373,8 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-06 | BEA-044 同一运行消歧 | 业务 Runtime 的 `resolve-target` 返回结构化候选；Desktop 将其保存在工作流错误中。缺少用户确认、非法候选及空选择均拒绝且运行保持失败；合法候选在同一 run 上重试，进入 `confirm-plan`，源码分析只执行一次、Profile 尚未创建。单元测试、持久化恢复测试、真实业务子进程与工作流消息桥集成测试均通过。锁屏期间 Electron 开发进程未生成连接文件，因此可见 Desktop/实际 Agent 对话验收仍待解锁，不冒充已完成。 |
 | 2026-10-06 | BEA-044 解锁后真实 Runtime 验收 | 重启 `dev:business` 后 `build/connection.json` 正常生成，业务 Runtime 完成握手。`node scripts/verify-business-target-selection.mjs` 经真实 Desktop HTTP 接口创建歧义 run `b11629c3-6d8a-4675-ac46-205d7bf2e105`，返回两个候选；空选择、未确认、非候选均被拒且状态不变；确认 `/repay/receiptList` 后同一 run 进入 `confirm-plan`，未创建 Profile。测试 run 已取消。该验证覆盖实际 Electron/Runtime 桥，但不等于可见 Agent 对话的人工确认验收。 |
 | 2026-10-06 | BEA-044 可见 Agent 对话验收 | Desktop 新对话仅提交“借据列表正常展示”且不预设路由，Agent 调用一次开始工具，展示 `/loanPurpose/receiptList/:batchId` 与 `/repay/receiptList` 两个候选后停止。用户明确选择候选 2，Agent 调用重试工具；后端只读状态确认同一 run `90941d10-6bee-4298-ba01-d7e921903268` 转为 `waiting_for_user`、当前步骤 `confirm-plan`、路由 `/repay/receiptList`、选择来源 `user-confirmed-candidate`，`create-profile` 和 `apply-profile` 均为 `pending`。分析质量门为 `review`，因此未自动草拟或通过方案。 |
+| 2026-10-06 | BEA-045 Review 证据包 | 针对 BEA-044 的 `review` 样本，发现第一候选已有 `list[].duestatus` 等字段消费证据，但汇总因未达到自动复用置信度而显示 `unproven`。现区分证据状态与复用资格：保留 `partial` 与消费字段，标记 `candidateOnly`；为 `review` 生成最多三个候选的匹配分数、覆盖率、未证实字段数量和少量源码位置，并给出逐项复核要求。运行时测试确认 `review` 仍不自动草拟方案，`ready` 路径不增加证据包。 |
+| 2026-10-06 | BEA-045 真实对话验收与边界修正 | 开发版重启后通过真实 Desktop Runtime 运行两次只读分析，均停在 `confirm-plan` 且创建步骤 `pending`，测试 run 已取消。可见 Agent 对话成功展示质量门、前三候选和字段证据，但首轮把总分漏算 API 证据分、将“未找到消费”过度推断为“目标 UI 必需字段未证”。补充 `rankingBreakdown` 和有界证据解释后，第二轮对话准确写出 290=API 证据 140+意图 100+字段影响 50，并明确未证字段不等于无用或必需。另补充自动复用资格解释：`strongestScenarioHasFieldImpact=false` 可因缺少唯一高置信匹配，不代表第一候选没有字段消费证据。 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |

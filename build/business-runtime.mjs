@@ -1067,19 +1067,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const uniqueConfidentMatch = confidentExistingMatch && strongestMatch
       && strongestMatch.apiUrl === focusApiUrls[0]
       && (!nextMatch || strongestMatch.score - nextMatch.score >= 40)
-    const strongestScenario = uniqueConfidentMatch
+    const candidateScenario = strongestMatch
       ? apis.find(api => api.apiUrl === strongestMatch.apiUrl)?.scenarios.find(scenario => scenario.id === strongestMatch.scenarioId)
       : undefined
+    const strongestScenario = uniqueConfidentMatch ? candidateScenario : undefined
     const strongestScenarioHasFieldImpact = Boolean(strongestScenario?.fieldImpact?.consumedFields?.length)
     analysisPlan.fieldImpact = strongestMatch ? {
-      status: strongestScenarioHasFieldImpact ? strongestScenario.fieldImpact.level : 'unproven',
+      status: candidateScenario?.fieldImpact?.level || 'unproven',
+      candidateOnly: !uniqueConfidentMatch,
       evidenceKind: 'bounded-source-field-consumption',
       apiUrl: strongestMatch.apiUrl,
       scenarioId: strongestMatch.scenarioId,
-      changedFields: strongestScenario?.changedFields || [],
-      consumedFields: strongestScenario?.fieldImpact?.consumedFields || [],
-      unprovenFields: strongestScenario?.fieldImpact?.unprovenFields || [],
-      coverage: strongestScenario?.fieldImpact?.coverage || 0,
+      changedFieldCount: candidateScenario?.changedFields?.length || 0,
+      consumedFieldCount: candidateScenario?.fieldImpact?.consumedFields?.length || 0,
+      unprovenFieldCount: candidateScenario?.fieldImpact?.unprovenFields?.length || 0,
+      fieldListLimit: 24,
+      changedFields: (candidateScenario?.changedFields || []).slice(0, 24),
+      consumedFields: (candidateScenario?.fieldImpact?.consumedFields || []).slice(0, 24),
+      unprovenFields: (candidateScenario?.fieldImpact?.unprovenFields || []).slice(0, 24),
+      coverage: candidateScenario?.fieldImpact?.coverage || 0,
       finalUiVerificationRequired: true
     } : {
       status: 'pending-plan-fields',
@@ -1125,6 +1131,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         focusApisHaveSourceEvidence: allFocusApisHaveSourceEvidence,
         confidentExistingMatch,
         uniqueConfidentMatch,
+        candidateHasFieldImpact: Boolean(candidateScenario?.fieldImpact?.consumedFields?.length),
         strongestScenarioHasFieldImpact
       },
       guidance: ready
@@ -1132,6 +1139,41 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         : reviewable
           ? 'Review focused evidence and alternatives. Request full workflow detail only when the bounded evidence remains ambiguous.'
           : 'Do not create a scenario yet. Refine the target page/API or repair the reported evidence gap.'
+    }
+    if (analysisPlan.qualityGate.level === 'review') {
+      analysisPlan.reviewPacket = {
+        status: 'manual-review-required',
+        autoReuseEligibility: { uniqueConfidentMatch: Boolean(uniqueConfidentMatch),
+          candidateHasFieldImpact: Boolean(candidateScenario?.fieldImpact?.consumedFields?.length),
+          explanation: 'strongestScenarioHasFieldImpact requires a unique confident match; false does not imply that the leading candidate lacks field-consumption evidence.' },
+        reason: qualityGaps.map(gap => ({ code: gap, explanation: {
+          'intent-match-not-confident': 'No existing Scenario has a sufficiently strong intent match; field consumption does not establish business-state correctness.',
+          'existing-scenario-match-ambiguous': 'Multiple existing Scenarios are close in rank; inspect their Mock state before choosing one.',
+          'matched-scenario-field-impact-unproven': 'The leading Scenario has no proven consumption of its changed fields on this page.'
+        }[gap] || 'Review the reported evidence gap before confirming a plan.' })),
+        candidates: existingScenarioMatches.slice(0, 3).map(match => {
+          const scenario = apis.find(api => api.apiUrl === match.apiUrl)?.scenarios.find(item => item.id === match.scenarioId)
+          const impact = scenario?.fieldImpact
+          return { apiUrl: match.apiUrl, scenarioId: match.scenarioId, label: match.label,
+            intentMatchScore: match.matchScore, rankingScore: match.score,
+            rankingBreakdown: { apiEvidenceScore: match.score - match.matchScore - match.impactScore,
+              intentMatchScore: match.matchScore, fieldImpactScore: match.impactScore },
+            matchReasons: match.reasons.filter(reason => reason !== 'field-impact-consumed'),
+            fieldImpact: { level: impact?.level || 'unproven', coverage: impact?.coverage || 0,
+              changedFieldCount: scenario?.changedFields?.length || 0,
+              consumedFieldCount: impact?.consumedFields?.length || 0,
+              unprovenFieldCount: impact?.unprovenFields?.length || 0,
+              interpretation: 'Counts describe changed fields in this Scenario, not the fields required by the requested UI state. Unproven means no consumption was found in the bounded source set, not that the field is unused or necessary.',
+              consumedFields: (impact?.consumedFields || []).slice(0, 12),
+              sourceEvidence: (impact?.evidence || []).slice(0, 4).map(item => ({ field: item.field,
+                evidence: (item.evidence || []).slice(0, 1) })) } }
+        }),
+        checksBeforeConfirmation: [
+          'Compare the intended business state with the actual Mock values in the selected Scenario; names and scores alone are insufficient.',
+          'Check changed fields that are consumed by this page and explain any relevant unproven fields.',
+          'Keep Profile creation behind confirm-plan and verify the final iframe text and real Scenario requests after applying.'
+        ]
+      }
     }
     if (analysisPlan.qualityGate.autoDraftAllowed) {
       const draftHash = contentHash({ routePath: route.path, query: input.query || '', apiUrl: strongestMatch.apiUrl, scenarioId: strongestMatch.scenarioId }).slice(0, 12)
