@@ -668,8 +668,26 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       queryTerms.reduce((score, term) => score + (String(text).toLowerCase().includes(term) ? points : 0), 0))
     if (!safeRoute(routePath)) throw new Error('routePath must be a safe absolute business route')
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
+    const semanticExpectations = input?.semanticExpectations ?? []
+    if (!Array.isArray(semanticExpectations) || semanticExpectations.length > 16 || semanticExpectations.some(rule =>
+      !plainObject(rule) || typeof rule.id !== 'string' || rule.id.length > 128
+      || rule.routePath !== routePath || rule.intentEquals !== input.query
+      || typeof rule.apiUrl !== 'string' || !safeRoute(rule.apiUrl)
+      || !Array.isArray(rule.fieldAssertions) || rule.fieldAssertions.length > 16
+      || rule.fieldAssertions.some(assertion => !plainObject(assertion) || !Array.isArray(assertion.path)
+        || assertion.path.length < 1 || assertion.path.length > 12
+        || assertion.path.some(part => typeof part === 'number'
+          ? !Number.isSafeInteger(part) || part < 0 || part > 1000
+          : typeof part !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part)
+            || ['__proto__', 'constructor', 'prototype'].includes(part))
+        || (assertion.equals !== null && !['string', 'number', 'boolean'].includes(typeof assertion.equals)))
+      || !Array.isArray(rule.sourceScenarioIds) || rule.sourceScenarioIds.length > 32
+      || rule.sourceScenarioIds.some(id => typeof id !== 'string' || id.length > 128))) {
+      throw new Error('Invalid semantic expectations for target analysis')
+    }
     const preferencesStartedAt = performance.now()
     const preferences = await readAnalysisPreferences()
+    const reuseEnabled = preferences.sessionReuse && semanticExpectations.length === 0
     const reuseKey = contentHash({
       sessionId,
       sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
@@ -679,7 +697,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       normalizedQuery: normalizedHint(query),
       explicitApis: [...explicitApis].filter(value => typeof value === 'string').sort()
     })
-    const reusable = preferences.sessionReuse ? sessionAnalysisReuse.get(reuseKey) : undefined
+    const reusable = reuseEnabled ? sessionAnalysisReuse.get(reuseKey) : undefined
     const preferencesAndReuseLookupMs = roundDuration(performance.now() - preferencesStartedAt)
     if (reusable && reusable.expiresAt > Date.now()) {
       const evidenceId = randomUUID()
@@ -1140,6 +1158,49 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           ? 'Review focused evidence and alternatives. Request full workflow detail only when the bounded evidence remains ambiguous.'
           : 'Do not create a scenario yet. Refine the target page/API or repair the reported evidence gap.'
     }
+    const compareSemanticCandidate = match => {
+      const applicable = semanticExpectations.filter(rule => rule.apiUrl === match.apiUrl)
+      if (!applicable.length) return { status: 'not-declared', reuseAdvice: 'no-semantic-rule-for-api', rules: [] }
+      const scenario = shortlistedCandidates.find(item => item.candidate.apiUrl === match.apiUrl)
+        ?.scenarios.find(item => item.id === match.scenarioId)
+      const rules = applicable.map(rule => {
+        const assertions = rule.fieldAssertions.map(assertion => {
+          let actual = scenario?.data
+          let present = Boolean(scenario)
+          for (const part of assertion.path) {
+            if (!present || !actual || typeof actual !== 'object' || !Object.hasOwn(actual, part)) { present = false; break }
+            actual = actual[part]
+          }
+          const scalar = present && (actual === null || ['string', 'number', 'boolean'].includes(typeof actual))
+          const status = !scalar ? 'unknown' : actual === assertion.equals ? 'matched' : 'conflict'
+          return { path: assertion.path, expected: assertion.equals,
+            ...(scalar && (typeof actual !== 'string' || actual.length <= 64) ? { actual } : {}),
+            status }
+        })
+        const status = assertions.some(item => item.status === 'conflict') ? 'conflict'
+          : assertions.length && assertions.every(item => item.status === 'matched') ? 'matched' : 'unknown'
+        return { ruleId: rule.id, status, approvedSource: rule.sourceScenarioIds.includes(match.scenarioId), assertions }
+      })
+      const status = rules.some(item => item.status === 'conflict') ? 'conflict'
+        : rules.every(item => item.status === 'matched') ? 'matched' : 'unknown'
+      return { status, reuseAdvice: status === 'conflict' ? 'do-not-reuse'
+        : status === 'matched' && rules.every(item => item.approvedSource) ? 'eligible-for-reviewed-source-reuse'
+          : status === 'matched' ? 'values-match-but-source-not-allowlisted' : 'manual-value-review-required',
+      rules }
+    }
+    if (semanticExpectations.length) {
+      analysisPlan.semanticValueChecks = {
+        method: 'plugin-declared-exact-scalar-assertions',
+        note: 'Only declared paths are classified. Matched values do not prove final UI behavior; missing paths remain unknown. Source ID approval is reported separately.',
+        candidates: existingScenarioMatches.slice(0, 3).map(match => ({ apiUrl: match.apiUrl,
+          scenarioId: match.scenarioId, ...compareSemanticCandidate(match) })),
+        approvedSources: [...new Map(semanticExpectations.flatMap(rule => rule.sourceScenarioIds.map(scenarioId => {
+          const key = `${rule.apiUrl}\u0000${scenarioId}`
+          return [key, { apiUrl: rule.apiUrl, scenarioId,
+            ...compareSemanticCandidate({ apiUrl: rule.apiUrl, scenarioId }) }]
+        }))).values()]
+      }
+    }
     if (analysisPlan.qualityGate.level === 'review') {
       analysisPlan.reviewPacket = {
         status: 'manual-review-required',
@@ -1159,6 +1220,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             rankingBreakdown: { apiEvidenceScore: match.score - match.matchScore - match.impactScore,
               intentMatchScore: match.matchScore, fieldImpactScore: match.impactScore },
             matchReasons: match.reasons.filter(reason => reason !== 'field-impact-consumed'),
+            ...(semanticExpectations.length ? { semanticComparison: compareSemanticCandidate(match) } : {}),
             fieldImpact: { level: impact?.level || 'unproven', coverage: impact?.coverage || 0,
               changedFieldCount: scenario?.changedFields?.length || 0,
               consumedFieldCount: impact?.consumedFields?.length || 0,
@@ -1201,7 +1263,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })),
       apis, analysisPlan,
       acceleration,
-      analysisReuse: { enabled: preferences.sessionReuse, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
+      analysisReuse: { enabled: reuseEnabled, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
     }
     const resultPreparedAt = performance.now()
     const evidenceRecord = { routePath: route.path,
@@ -1209,7 +1271,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       expiresAt: expiresAtMs }
     analysisEvidence.set(evidenceId, evidenceRecord)
     const evidenceStoredAt = performance.now()
-    if (preferences.sessionReuse) {
+    if (reuseEnabled) {
       sessionAnalysisReuse.set(reuseKey, { result, evidence: evidenceRecord, expiresAt: Date.now() + 5 * 60_000, analyzedAt })
       while (sessionAnalysisReuse.size > 50) sessionAnalysisReuse.delete(sessionAnalysisReuse.keys().next().value)
     }

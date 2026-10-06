@@ -50,13 +50,14 @@ export function registerBusinessScenarioWorkflow(options: {
       }, input.sessionId) as BusinessScenarioWorkflowTarget
       const resolveTargetMs = Math.max(0, nowMs() - resolveStartedAt)
       const analyzeStartedAt = nowMs()
+      const semanticExpectations = matchingSemanticRules({ ...input, target }, options.semanticRules)
       const analysis = await options.requestBusiness('/__desktop/analyze-target', {
         routePath: target.routePath,
         query: input.query,
-        apiUrls: input.apiUrls ?? []
+        apiUrls: input.apiUrls ?? [],
+        ...(semanticExpectations.length ? { semanticExpectations } : {})
       }, input.sessionId)
       const analyzeTargetMs = Math.max(0, nowMs() - analyzeStartedAt)
-      const semanticExpectations = matchingSemanticRules({ ...input, target }, options.semanticRules)
       return {
         output: analysis,
         contextPatch: { analysis, target, semanticExpectations, requestTimings: { resolveTargetMs, analyzeTargetMs } }
@@ -65,8 +66,10 @@ export function registerBusinessScenarioWorkflow(options: {
     'create-profile': async ({ context, previousOutput }) => {
       const input = parseStartInput(context)
       const plan = parsePlan(previousOutput)
-      assertSemanticPlan(matchingSemanticRules(context, options.semanticRules), plan)
       const analysis = record(context.analysis, 'Workflow analysis result is missing.')
+      const semanticRules = matchingSemanticRules(context, options.semanticRules)
+      assertSemanticPlan(semanticRules, plan)
+      assertSemanticSourceValues(semanticRules, plan, analysis)
       assertAnalysisQuality(analysis)
       const target = parseTarget(context.target)
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
@@ -102,7 +105,10 @@ export function registerBusinessScenarioWorkflow(options: {
     compatibleRunVersions: options.definition?.compatibleRunVersions,
     checkpointValidators: options.semanticRules?.length ? {
       'confirm-plan': ({ context, checkpointOutput }) => {
-        assertSemanticPlan(matchingSemanticRules(context, options.semanticRules), parsePlan(checkpointOutput))
+        const rules = matchingSemanticRules(context, options.semanticRules)
+        const plan = parsePlan(checkpointOutput)
+        assertSemanticPlan(rules, plan)
+        assertSemanticSourceValues(rules, plan, record(context.analysis, 'Workflow analysis result is missing.'))
       }
     } : undefined,
     retryValidators: {
@@ -155,6 +161,30 @@ function assertSemanticPlan(rules: BusinessPluginSemanticRule[], plan: BusinessS
       throw Object.assign(new Error(
         `Confirmed plan does not satisfy business semantic rule ${rule.id}; review the Mock fields or source Scenario before creating a Profile.`
       ), { code: 'WORKFLOW_SEMANTIC_MISMATCH', retryable: false })
+    }
+  }
+}
+
+function assertSemanticSourceValues(rules: BusinessPluginSemanticRule[], plan: BusinessScenarioWorkflowPlan, analysis: Record<string, unknown>): void {
+  if (!rules.some(rule => rule.fieldAssertions.length)) return
+  const analysisPlan = analysis.analysisPlan && typeof analysis.analysisPlan === 'object' && !Array.isArray(analysis.analysisPlan)
+    ? analysis.analysisPlan as Record<string, unknown> : undefined
+  const checks = analysisPlan?.semanticValueChecks && typeof analysisPlan.semanticValueChecks === 'object'
+    ? analysisPlan.semanticValueChecks as Record<string, unknown> : undefined
+  const approvedSources = Array.isArray(checks?.approvedSources) ? checks.approvedSources : undefined
+  // Older persisted workflow runs have no value-check snapshot; retain their previous contract.
+  if (!approvedSources) return
+  for (const rule of rules) {
+    if (!rule.fieldAssertions.length) continue
+    for (const scenario of plan.scenarios) {
+      if (scenario.apiUrl !== rule.apiUrl || !scenario.sourceScenarioId) continue
+      const verified = approvedSources.some(value => value && typeof value === 'object' &&
+        (value as Record<string, unknown>).apiUrl === rule.apiUrl &&
+        (value as Record<string, unknown>).scenarioId === scenario.sourceScenarioId &&
+        (value as Record<string, unknown>).status === 'matched')
+      if (!verified) throw Object.assign(new Error(
+        `Source Scenario ${scenario.sourceScenarioId} has not passed the declared value checks for semantic rule ${rule.id}; use a verified source or review a direct Mock payload.`
+      ), { code: 'WORKFLOW_SEMANTIC_VALUE_UNVERIFIED', retryable: false })
     }
   }
 }

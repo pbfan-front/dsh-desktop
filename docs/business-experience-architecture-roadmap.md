@@ -331,6 +331,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | BEA-043 | P1 | 正常借据真实页面端到端语义验收 | 已完成明确路由的无头浏览器样本；可见 GUI 与自然语言目标消歧未覆盖 | Codex | - | 隔离会话真实创建、应用 Mock Profile，以 Chrome 加载 Desktop 业务预览和实际 iframe，验证正常借据页面、真实 Scenario 请求、路由及禁止文案；工作流与只读业务语义评估均通过，最后回滚 Profile。自然语言不提供路由时得到多路由歧义，不能计为意图解析成功 |
 | BEA-044 | P1 | 多页面同名目标消歧 | 已完成，真实 Desktop Agent 对话验收通过 | Codex | - | 歧义错误保存结构化候选路由与页面标题；Agent 展示候选并等待用户明确选择。重试仅接受该运行的候选及用户确认标记，在原运行中重新解析选定路由，随后才开始源码分析；无确认或非法候选不改变运行。无需更改插件工作流拓扑，已有完成步骤不重放 |
 | BEA-045 | P1 | Review 质量门证据包与候选区分 | 已实现，真实 Desktop 对话与 Runtime 验收通过 | Codex | - | `review` 结果附带有界候选对比、总分拆解、缺口解释与源码字段消费位置。第一候选的已知字段证据不再因自动复用置信度不足被误报为 `unproven`，改用 `candidateOnly` 明确其尚未经语义确认；不改变质量门阈值，不自动通过方案或写入 Profile |
+| BEA-046 | P1 | Mock 实际值与插件语义规则精确比对 | 已完成，自动化与真实 Desktop Runtime 只读验收通过 | Codex | - | 对精确命中规则的候选及获准来源读取实际 Mock 标量值，区分匹配、冲突与未知；来源 ID 获准不能代替值校验。冲突或未知在确认/创建前阻止来源复用，不改变质量门阈值及最终预览验证 |
 
 ## 8. 更新记录
 
@@ -375,6 +376,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-06 | BEA-044 可见 Agent 对话验收 | Desktop 新对话仅提交“借据列表正常展示”且不预设路由，Agent 调用一次开始工具，展示 `/loanPurpose/receiptList/:batchId` 与 `/repay/receiptList` 两个候选后停止。用户明确选择候选 2，Agent 调用重试工具；后端只读状态确认同一 run `90941d10-6bee-4298-ba01-d7e921903268` 转为 `waiting_for_user`、当前步骤 `confirm-plan`、路由 `/repay/receiptList`、选择来源 `user-confirmed-candidate`，`create-profile` 和 `apply-profile` 均为 `pending`。分析质量门为 `review`，因此未自动草拟或通过方案。 |
 | 2026-10-06 | BEA-045 Review 证据包 | 针对 BEA-044 的 `review` 样本，发现第一候选已有 `list[].duestatus` 等字段消费证据，但汇总因未达到自动复用置信度而显示 `unproven`。现区分证据状态与复用资格：保留 `partial` 与消费字段，标记 `candidateOnly`；为 `review` 生成最多三个候选的匹配分数、覆盖率、未证实字段数量和少量源码位置，并给出逐项复核要求。运行时测试确认 `review` 仍不自动草拟方案，`ready` 路径不增加证据包。 |
 | 2026-10-06 | BEA-045 真实对话验收与边界修正 | 开发版重启后通过真实 Desktop Runtime 运行两次只读分析，均停在 `confirm-plan` 且创建步骤 `pending`，测试 run 已取消。可见 Agent 对话成功展示质量门、前三候选和字段证据，但首轮把总分漏算 API 证据分、将“未找到消费”过度推断为“目标 UI 必需字段未证”。补充 `rankingBreakdown` 和有界证据解释后，第二轮对话准确写出 290=API 证据 140+意图 100+字段影响 50，并明确未证字段不等于无用或必需。另补充自动复用资格解释：`strongestScenarioHasFieldImpact=false` 可因缺少唯一高置信匹配，不代表第一候选没有字段消费证据。 |
+| 2026-10-06 | BEA-046 Mock 值语义比对 | 在精确命中插件规则时，分析阶段读取候选与获准来源的实际 Mock 值并分开报告来源授权；冲突、未知均不能以来源 ID 白名单绕过确认关口。只校验声明字段；会话分析缓存对此类请求禁用，最终真实请求和页面校验保留。运行时脚本、142 个测试文件（1216 项）、类型检查及业务包一致性检查通过；重启 `dev:business` 后真实 Desktop Runtime 只读样本停在 `confirm-plan`，获准来源实值为 `matched`，`create-profile` 仍是 `pending`，样本 run 已取消。未执行写入或最终 iframe 验证。 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |

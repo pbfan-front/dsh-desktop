@@ -164,6 +164,32 @@ try {
   assert.ok(receiptAnalysis.analysisPlan.reviewPacket.candidates[0].fieldImpact.sourceEvidence.length > 0)
   assert.equal(receiptAnalysis.analysisPlan.suggestedPlan, undefined)
   assert.equal(receiptAnalysis.analysisPlan.repositorySearch, 'only-if-focus-candidates-are-insufficient')
+  const semanticRule = { id: 'receipt-normal-status', routePath: '/repay/receiptList',
+    intentEquals: '借据列表正常展示', apiUrl: '/loanNbr/loanNbr.json',
+    fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
+    sourceScenarioIds: ['正常借据可以提前结清'] }
+  const semanticRequest = rule => get('/__desktop/analyze-target', { method: 'POST', headers,
+    body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据列表正常展示', semanticExpectations: [rule] }) })
+  const semanticAnalysis = await (await semanticRequest(semanticRule)).json()
+  assert.equal(semanticAnalysis.analysisReuse.enabled, false)
+  const sourceCheck = semanticAnalysis.analysisPlan.semanticValueChecks.candidates.find(item => item.scenarioId === '正常借据可以提前结清')
+  assert.equal(sourceCheck.status, 'matched')
+  assert.equal(sourceCheck.reuseAdvice, 'eligible-for-reviewed-source-reuse')
+  assert.equal(semanticAnalysis.analysisPlan.semanticValueChecks.approvedSources.find(item => item.scenarioId === '正常借据可以提前结清').status, 'matched')
+  assert.deepEqual(sourceCheck.rules[0].assertions[0], { path: ['data', 'list', 0, 'duestatus'], expected: '0', actual: '0', status: 'matched' })
+  assert.equal(semanticAnalysis.analysisPlan.reviewPacket.candidates.find(item => item.scenarioId === '正常借据可以提前结清').semanticComparison.status, 'matched')
+  const conflictAnalysis = await (await semanticRequest({ ...semanticRule,
+    fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '1' }] })).json()
+  const conflictCheck = conflictAnalysis.analysisPlan.semanticValueChecks.candidates.find(item => item.scenarioId === '正常借据可以提前结清')
+  assert.equal(conflictCheck.status, 'conflict')
+  assert.equal(conflictCheck.reuseAdvice, 'do-not-reuse')
+  assert.equal(conflictAnalysis.analysisPlan.semanticValueChecks.approvedSources.find(item => item.scenarioId === '正常借据可以提前结清').status, 'conflict')
+  const unknownAnalysis = await (await semanticRequest({ ...semanticRule,
+    fieldAssertions: [{ path: ['data', 'list', 0, 'not_declared_field'], equals: '0' }] })).json()
+  const unknownCheck = unknownAnalysis.analysisPlan.semanticValueChecks.candidates.find(item => item.scenarioId === '正常借据可以提前结清')
+  assert.equal(unknownCheck.status, 'unknown')
+  assert.equal(unknownCheck.rules[0].assertions[0].status, 'unknown')
+  assert.equal(unknownCheck.reuseAdvice, 'manual-value-review-required')
   assert.equal(receiptAnalysis.acceleration.mode, 'assisted')
   assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
   assert.equal(receiptAnalysis.analysisReuse.reused, false)
