@@ -15,6 +15,7 @@ export type BusinessPreviewState = {
 export type BusinessControlPath =
   | '/__desktop/resolve-target'
   | '/__desktop/analyze-target'
+  | '/__desktop/validate-semantic-source'
   | '/__desktop/create-profile'
   | '/__desktop/apply'
   | '/__desktop/verify'

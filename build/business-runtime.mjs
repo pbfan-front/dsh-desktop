@@ -322,6 +322,59 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return null
   }
+  const readFreshMockConfig = async relativePath => {
+    for (const file of [join(userRoot, relativePath), join(source, relativePath)]) {
+      try { return { file, config: JSON.parse(await readFile(file, 'utf8')) } }
+      catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+    return null
+  }
+  const validSemanticExpectations = (rules, routePath, query) => Array.isArray(rules) && rules.length <= 16 && rules.every(rule =>
+    plainObject(rule) && safeText(rule.id, 128) && rule.routePath === routePath && rule.intentEquals === query
+    && safeRoute(rule.apiUrl) && Array.isArray(rule.fieldAssertions) && rule.fieldAssertions.length <= 16
+    && rule.fieldAssertions.every(assertion => plainObject(assertion) && Array.isArray(assertion.path)
+      && assertion.path.length >= 1 && assertion.path.length <= 12
+      && assertion.path.every(part => typeof part === 'number'
+        ? Number.isSafeInteger(part) && part >= 0 && part <= 1000
+        : typeof part === 'string' && /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part)
+          && !['__proto__', 'constructor', 'prototype'].includes(part))
+      && (assertion.equals === null || ['string', 'number', 'boolean'].includes(typeof assertion.equals)))
+    && Array.isArray(rule.sourceScenarioIds) && rule.sourceScenarioIds.length <= 32
+    && rule.sourceScenarioIds.every(id => safeText(id, 128)))
+  const checkScenarioSemanticValues = (rules, item, sourceScenario) => {
+    const applicable = rules.filter(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
+    if (!applicable.length) return { status: 'matched' }
+    if (!sourceScenario) return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId }
+    for (const rule of applicable) {
+      if (!rule.sourceScenarioIds.includes(item.sourceScenarioId)) return { status: 'conflict', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id }
+      for (const assertion of rule.fieldAssertions) {
+        let value = sourceScenario.data
+        let present = true
+        for (const part of assertion.path) {
+          if (!value || typeof value !== 'object' || !Object.hasOwn(value, part)) { present = false; break }
+          value = value[part]
+        }
+        if (!present || (value !== null && !['string', 'number', 'boolean'].includes(typeof value))) {
+          return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id, path: assertion.path }
+        }
+        if (value !== assertion.equals) return { status: 'conflict', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id, path: assertion.path }
+      }
+    }
+    return { status: 'matched' }
+  }
+  const checkFreshSemanticSources = async (rules, scenarios) => {
+    for (const item of scenarios) {
+      if (!item?.sourceScenarioId) continue
+      const applicable = rules.filter(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
+      if (!applicable.length) continue
+      if (!safeRoute(item.apiUrl) || !safeText(item.sourceScenarioId, 128)) return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId }
+      const existing = await readFreshMockConfig(apiMockRelative(item.apiUrl))
+      const sourceScenario = existing && scenarioArray(existing.config).find(value => value.id === item.sourceScenarioId)
+      const result = checkScenarioSemanticValues(rules, item, sourceScenario)
+      if (result.status !== 'matched') return result
+    }
+    return { status: 'matched' }
+  }
   const sourceTextFileCache = new Map()
   const sourceTextCacheStats = { hits: 0, misses: 0, invalidations: 0 }
   const readCachedSourceText = async relativePath => {
@@ -669,20 +722,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     if (!safeRoute(routePath)) throw new Error('routePath must be a safe absolute business route')
     const explicitApis = Array.isArray(input?.apiUrls) ? input.apiUrls : []
     const semanticExpectations = input?.semanticExpectations ?? []
-    if (!Array.isArray(semanticExpectations) || semanticExpectations.length > 16 || semanticExpectations.some(rule =>
-      !plainObject(rule) || typeof rule.id !== 'string' || rule.id.length > 128
-      || rule.routePath !== routePath || rule.intentEquals !== input.query
-      || typeof rule.apiUrl !== 'string' || !safeRoute(rule.apiUrl)
-      || !Array.isArray(rule.fieldAssertions) || rule.fieldAssertions.length > 16
-      || rule.fieldAssertions.some(assertion => !plainObject(assertion) || !Array.isArray(assertion.path)
-        || assertion.path.length < 1 || assertion.path.length > 12
-        || assertion.path.some(part => typeof part === 'number'
-          ? !Number.isSafeInteger(part) || part < 0 || part > 1000
-          : typeof part !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part)
-            || ['__proto__', 'constructor', 'prototype'].includes(part))
-        || (assertion.equals !== null && !['string', 'number', 'boolean'].includes(typeof assertion.equals)))
-      || !Array.isArray(rule.sourceScenarioIds) || rule.sourceScenarioIds.length > 32
-      || rule.sourceScenarioIds.some(id => typeof id !== 'string' || id.length > 128))) {
+    if (!validSemanticExpectations(semanticExpectations, routePath, input.query)) {
       throw new Error('Invalid semantic expectations for target analysis')
     }
     const preferencesStartedAt = performance.now()
@@ -1597,7 +1637,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         if (url.pathname === '/__desktop/profiles') return respond(res, 200, { profiles: await catalog() })
         if (url.pathname === '/__desktop/evidence') return respond(res, 200, { sessionId, revision: state.revision, profileId: state.profileId, requests: evidence.filter(item => item.sessionId === sessionId).slice(-100), pageObservation })
         if (url.pathname === '/__desktop/result') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
-        const legacyWorkflowPaths = new Set(['/__desktop/analyze-target', '/__desktop/create-profile', '/__desktop/apply', '/__desktop/verify'])
+        const legacyWorkflowPaths = new Set(['/__desktop/analyze-target', '/__desktop/validate-semantic-source', '/__desktop/create-profile', '/__desktop/apply', '/__desktop/verify'])
         if (legacyWorkflowPaths.has(url.pathname) && req.method === 'POST') {
           const internalWorkflow = req.headers['x-dsh-workflow-token'] === workflowToken
           const preference = await readWorkflowPreferences()
@@ -1606,6 +1646,18 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             return respond(res, 409, { error: 'Legacy scenario tools are disabled in workflow mode. Use business_start_scenario_workflow or switch explicitly to legacy mode.' })
           }
           await auditWorkflowMode({ mode: internalWorkflow ? 'workflow' : 'legacy', action: url.pathname, sessionId, outcome: 'allowed' })
+        }
+        if (url.pathname === '/__desktop/validate-semantic-source' && req.method === 'POST') {
+          let body = ''
+          for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
+          const input = JSON.parse(body)
+          if (!safeRoute(input?.routePath) || !validSemanticExpectations(input?.semanticExpectations, input.routePath, input.query)
+            || !Array.isArray(input.scenarios) || input.scenarios.length > 12) return respond(res, 422, { error: 'Invalid semantic source validation request' })
+          const result = await checkFreshSemanticSources(input.semanticExpectations, input.scenarios)
+          return respond(res, result.status === 'matched' ? 200 : 422, result.status === 'matched' ? result : {
+            error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before confirming the plan.',
+            code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+          })
         }
         if (url.pathname === '/__desktop/resolve-target' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) return respond(res, 413, { error: 'Request too large' }) }
@@ -1670,6 +1722,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           if (!safeId(input?.profile?.id)) return respond(res, 422, { error: 'Invalid profile id' })
           if (!safeText(input.profile.label) || !safeText(input.profile.page, 64) || !safeRoute(input.profile.routePath)) return respond(res, 422, { error: 'profile requires a non-empty label, page and safe absolute routePath' })
           if (!Array.isArray(input.scenarios) || input.scenarios.length < 1 || input.scenarios.length > 12) return respond(res, 422, { error: 'scenarios must contain 1-12 items' })
+          const sourceRules = input.semanticExpectations ?? []
+          if (!validSemanticExpectations(sourceRules, input.profile.routePath, input.query)) return respond(res, 422, { error: 'Invalid semantic expectations for Profile creation' })
+          if (sourceRules.length) {
+            const result = await checkFreshSemanticSources(sourceRules, input.scenarios)
+            if (result.status !== 'matched') return respond(res, 422, {
+              error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before creating a Profile.',
+              code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+            })
+          }
           const analysis = analysisEvidence.get(input.evidenceId)
           if (!analysis || analysis.expiresAt < Date.now()) return respond(res, 422, { error: 'A current business_analyze_target evidenceId is required before creating a Profile' })
           if (analysis.routePath !== input.profile.routePath) return respond(res, 422, { error: `Profile routePath does not match analyzed route ${analysis.routePath}` })
@@ -1691,7 +1752,8 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             if (apiEvidence.mockPath !== relativePath) return respond(res, 422, { error: `API mock path differs from analyzed evidence: ${item.apiUrl}` })
             if (seenMockPaths.has(relativePath)) return respond(res, 422, { error: `Only one scenario binding is allowed per API in a Profile: ${item.apiUrl}` })
             seenMockPaths.add(relativePath)
-            let existing = await readMockConfig(relativePath)
+            let existing = hasSourceScenario && sourceRules.some(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
+              ? await readFreshMockConfig(relativePath) : await readMockConfig(relativePath)
             if (!existing) {
               if (!apiEvidence.typeEvidence?.response) return respond(res, 422, { error: `API has no response type evidence for first Mock creation: ${item.apiUrl}` })
               try {
@@ -1703,6 +1765,13 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             const existingScenarios = scenarioArray(existing.config)
             const sourceScenario = hasSourceScenario ? existingScenarios.find(value => value.id === item.sourceScenarioId) : undefined
             if (hasSourceScenario && !sourceScenario) return respond(res, 422, { error: `Source Scenario does not exist for ${item.apiUrl}: ${item.sourceScenarioId}` })
+            if (hasSourceScenario && sourceRules.length) {
+              const result = checkScenarioSemanticValues(sourceRules, item, sourceScenario)
+              if (result.status !== 'matched') return respond(res, 422, {
+                error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before creating a Profile.',
+                code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+              })
+            }
             const template = existing.config.baseData || existingScenarios[0]?.data
             let data
             try { data = normalizeScenarioData(sourceScenario ? sourceScenario.data : item.data, template, item.apiUrl) } catch (error) { return respond(res, 422, { error: error.message }) }

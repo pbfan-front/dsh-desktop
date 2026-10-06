@@ -352,6 +352,35 @@ describe('business scenario workflow', () => {
     expect(requestBusiness).toHaveBeenCalledWith('/__desktop/create-profile', expect.anything(), undefined)
   })
 
+  it('keeps confirmation waiting when the source changes after analysis', async () => {
+    let currentValue = '0'
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-source-changed' })
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/resolve-target') return { ...resolvedTarget, routePath: '/repay/receiptList' }
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1', analysisPlan: {
+        semanticValueChecks: { approvedSources: [{ apiUrl: '/loanNbr/loanNbr.json', scenarioId: '正常借据可以提前结清', status: 'matched' }] }
+      } }
+      if (path === '/__desktop/validate-semantic-source' && currentValue !== '0') throw Object.assign(
+        new Error('Source Scenario Mock values changed.'), { code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED' })
+      return { operationId: 'operation-1' }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness,
+      semanticRules: [{ id: 'receipt-normal-status', routePath: '/repay/receiptList', intentEquals: '借据列表正常展示',
+        apiUrl: '/loanNbr/loanNbr.json', fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
+        sourceScenarioIds: ['正常借据可以提前结清'] }] })
+    const analyzed = await start({ routePath: '/repay/receiptList', query: '借据列表正常展示' })
+    const sourcePlan = { ...plan, scenarios: [{ id: 'normal', apiUrl: '/loanNbr/loanNbr.json', sourceScenarioId: '正常借据可以提前结清' }] }
+    currentValue = '1'
+    await expect(runtime.resume(analyzed.id, sourcePlan)).rejects.toMatchObject({ code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED' })
+    expect(runtime.getRun(analyzed.id)).toMatchObject({ status: 'waiting_for_user', currentStepId: 'confirm-plan' })
+    expect(requestBusiness.mock.calls.some(([path]) => path === '/__desktop/create-profile')).toBe(false)
+    currentValue = '0'
+    expect((await runtime.resume(analyzed.id, sourcePlan)).status).toBe('waiting_for_user')
+    expect(requestBusiness).toHaveBeenCalledWith('/__desktop/create-profile', expect.objectContaining({
+      semanticExpectations: [expect.objectContaining({ id: 'receipt-normal-status' })]
+    }), undefined)
+  })
+
   it('omits an absent optional sessionId from the persisted workflow context', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-no-session' })
     const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target' ? resolvedTarget : ({ evidenceId: 'evidence-1' }))

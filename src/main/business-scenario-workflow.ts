@@ -70,11 +70,14 @@ export function registerBusinessScenarioWorkflow(options: {
       const semanticRules = matchingSemanticRules(context, options.semanticRules)
       assertSemanticPlan(semanticRules, plan)
       assertSemanticSourceValues(semanticRules, plan, analysis)
+      const sourceRules = semanticRules.filter(rule => rule.fieldAssertions.length && plan.scenarios.some(scenario =>
+        scenario.apiUrl === rule.apiUrl && scenario.sourceScenarioId))
       assertAnalysisQuality(analysis)
       const target = parseTarget(context.target)
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
       const created = await options.requestBusiness('/__desktop/create-profile', {
         evidenceId,
+        ...(sourceRules.length ? { query: input.query } : {}),
         profile: {
           id: plan.profileId,
           label: plan.label,
@@ -82,7 +85,8 @@ export function registerBusinessScenarioWorkflow(options: {
           routePath: target.routePath,
           page: plan.page
         },
-        scenarios: plan.scenarios
+        scenarios: plan.scenarios,
+        ...(sourceRules.length ? { semanticExpectations: sourceRules } : {})
       }, input.sessionId)
       return { output: created, contextPatch: { profileId: plan.profileId, plan } }
     },
@@ -104,11 +108,19 @@ export function registerBusinessScenarioWorkflow(options: {
     pluginId: options.pluginId,
     compatibleRunVersions: options.definition?.compatibleRunVersions,
     checkpointValidators: options.semanticRules?.length ? {
-      'confirm-plan': ({ context, checkpointOutput }) => {
+      'confirm-plan': async ({ context, checkpointOutput }) => {
         const rules = matchingSemanticRules(context, options.semanticRules)
         const plan = parsePlan(checkpointOutput)
         assertSemanticPlan(rules, plan)
         assertSemanticSourceValues(rules, plan, record(context.analysis, 'Workflow analysis result is missing.'))
+        const sourceRules = rules.filter(rule => rule.fieldAssertions.length && plan.scenarios.some(scenario =>
+          scenario.apiUrl === rule.apiUrl && scenario.sourceScenarioId))
+        if (sourceRules.length) await options.requestBusiness('/__desktop/validate-semantic-source', {
+          routePath: parseTarget(context.target).routePath,
+          query: parseStartInput(context).query,
+          semanticExpectations: sourceRules,
+          scenarios: plan.scenarios.filter(scenario => scenario.sourceScenarioId)
+        }, parseStartInput(context).sessionId)
       }
     } : undefined,
     retryValidators: {

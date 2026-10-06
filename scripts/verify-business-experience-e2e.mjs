@@ -68,7 +68,7 @@ try {
     runId,
     checkpointOutput: {
       profileId, label: 'BEA-043 隔离端到端样本', page: 'repay',
-      scenarios: [{ id: 'bea043_normal', apiUrl: scenario.apiUrl, data: source.data }]
+      scenarios: [{ id: 'bea043_normal', apiUrl: scenario.apiUrl, sourceScenarioId: source.id }]
     }
   })
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body))
@@ -115,7 +115,14 @@ try {
     runId, checkpointOutput: { route: scenario.routePath, containsText: scenario.visibleText, absentText: scenario.absentText }
   })
   assert.equal(verified.status, 200, JSON.stringify(verified.body))
-  const evaluation = evaluateBusinessExperience(verified.body, scenario)
+  // Source-clone plans carry an ID, not inline data. Evaluate the actual installed Overlay payload.
+  const installedMock = JSON.parse(await readFile(join(resolve('build/business-dev-user-data'),
+    'src/baseTypes/api/loanNbr/loanNbr/mock.json'), 'utf8'))
+  const installedScenario = installedMock.scenarios.find(item => item.id === 'bea043_normal')
+  assert.ok(installedScenario?.data, 'The cloned Scenario is missing from the installed Overlay')
+  const evaluationRun = structuredClone(verified.body)
+  evaluationRun.context.plan.scenarios.find(item => item.apiUrl === scenario.apiUrl).data = installedScenario.data
+  const evaluation = evaluateBusinessExperience(evaluationRun, scenario)
   assert.equal(evaluation.outcome, 'passed', JSON.stringify(evaluation))
   summary = { ok: true, shortIntent: 'ambiguous', qualifiedIntent: 'ambiguous', runId, profileId,
     requestHits: requestHits.length,

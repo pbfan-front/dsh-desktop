@@ -2,7 +2,7 @@ import { fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 const token = randomBytes(32).toString('hex')
@@ -190,6 +190,39 @@ try {
   assert.equal(unknownCheck.status, 'unknown')
   assert.equal(unknownCheck.rules[0].assertions[0].status, 'unknown')
   assert.equal(unknownCheck.reuseAdvice, 'manual-value-review-required')
+  const validationInput = { routePath: '/repay/receiptList', query: '借据列表正常展示',
+    semanticExpectations: [semanticRule], scenarios: [{ apiUrl: '/loanNbr/loanNbr.json', sourceScenarioId: '正常借据可以提前结清' }] }
+  const validateSource = () => get('/__desktop/validate-semantic-source', { method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify(validationInput) })
+  assert.equal((await validateSource()).status, 200)
+  const receiptRelative = 'src/baseTypes/api/loanNbr/loanNbr/mock.json'
+  const receiptOverlay = resolve(userRoot, receiptRelative)
+  const receiptSource = JSON.parse(await readFile(resolve(packageSourceRoot, receiptRelative), 'utf8'))
+  const receiptScenario = Array.isArray(receiptSource.scenarios)
+    ? receiptSource.scenarios.find(item => item.id === '正常借据可以提前结清')
+    : receiptSource.scenarios['正常借据可以提前结清']
+  assert.ok(receiptScenario)
+  const changedReceipt = structuredClone(receiptSource)
+  const changedScenario = Array.isArray(changedReceipt.scenarios)
+    ? changedReceipt.scenarios.find(item => item.id === '正常借据可以提前结清')
+    : changedReceipt.scenarios['正常借据可以提前结清']
+  changedScenario.data.data.list[0].duestatus = '1'
+  await mkdir(resolve(userRoot, 'src/baseTypes/api/loanNbr/loanNbr'), { recursive: true })
+  await writeFile(receiptOverlay, JSON.stringify(changedReceipt))
+  const changedValidation = await validateSource()
+  assert.equal(changedValidation.status, 422)
+  assert.equal((await changedValidation.json()).code, 'WORKFLOW_SEMANTIC_SOURCE_CHANGED')
+  const blockedProfile = await get('/__desktop/create-profile', { method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify({ evidenceId: semanticAnalysis.evidenceId, query: '借据列表正常展示',
+      semanticExpectations: [semanticRule], profile: { id: 'bea047_changed', label: 'Changed source',
+        page: 'receiptList', routePath: '/repay/receiptList' },
+      scenarios: [{ id: 'bea047_clone', label: 'Changed source', apiUrl: '/loanNbr/loanNbr.json', sourceScenarioId: '正常借据可以提前结清' }] }) })
+  assert.equal(blockedProfile.status, 422)
+  assert.equal((await blockedProfile.json()).code, 'WORKFLOW_SEMANTIC_SOURCE_CHANGED')
+  const blockedProfiles = await (await get('/__desktop/profiles', { headers })).json()
+  assert.equal(blockedProfiles.profiles.some(item => item.id === 'bea047_changed'), false)
+  await unlink(receiptOverlay)
+  assert.equal((await validateSource()).status, 200)
   assert.equal(receiptAnalysis.acceleration.mode, 'assisted')
   assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
   assert.equal(receiptAnalysis.analysisReuse.reused, false)

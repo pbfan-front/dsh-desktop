@@ -118,4 +118,6 @@ Agent 插件现提供 `business_start_scenario_workflow`、`business_resume_scen
 
 业务插件可选地在 manifest 中声明 `scenarioSemanticRules`。每条规则使用精确路由、精确意图和 API，指定直接 Mock 数据的标量字段断言及可接受的来源 Scenario ID；不执行插件脚本或正则。命中规则会随分析结果送给 Agent 供确认方案时审阅。Desktop 在接受 `confirm-plan` 输入前重新按当前插件规则校验，失败时保持检查点等待而不写 Profile；创建步骤重复校验作为防线。未声明或未精确匹配的意图不套用业务猜测，最终页面与真实请求验证仍不可省略。
 
-命中语义规则时，分析阶段会读取候选 Scenario 的实际 Mock 响应，对声明的标量路径分别标为 `matched`、`conflict` 或 `unknown`，并独立报告来源 ID 是否获准。`analysisPlan.semanticValueChecks` 包含候选与所有获准来源的检查结果；`reviewPacket` 也携带候选结果。`conflict` 不应复用，`unknown` 需继续核查，`matched` 仍不等于页面最终正确。新分析的来源复用方案在确认前和创建前必须取得已匹配的检查结果；会话分析复用对命中规则的请求关闭，以免沿用旧 Mock 值。旧版已持久化运行若无此快照，保持原校验契约。未声明字段不会被推断为正确；分析后的文件变动仍须依赖后续真实请求与页面验证发现。
+命中语义规则时，分析阶段会读取候选 Scenario 的实际 Mock 响应，对声明的标量路径分别标为 `matched`、`conflict` 或 `unknown`，并独立报告来源 ID 是否获准。`analysisPlan.semanticValueChecks` 包含候选与所有获准来源的检查结果；`reviewPacket` 也携带候选结果。`conflict` 不应复用，`unknown` 需继续核查，`matched` 仍不等于页面最终正确。新分析的来源复用方案在确认前和创建前必须取得已匹配的检查结果；会话分析复用对命中规则的请求关闭，以免沿用旧 Mock 值。旧版已持久化运行若无此快照，保持原校验契约。未声明字段不会被推断为正确；写入后外部再次修改 Mock 仍须依赖后续真实请求与页面验证发现。
+
+BEA-047 进一步在 `confirm-plan` 接受前从当前 Overlay/业务包文件重新读取所选来源，不使用分析缓存；若字段冲突、缺失或来源不存在，仍停在确认步骤，不写 Profile。`create-profile` 接口在写入前重复读取并检查，并从复核后的最新文件克隆，防止确认与写入之间出现过期来源。校验只针对精确命中的插件规则与所选来源；旧运行没有新规则快照时保持原契约。复核通过不替代真实 Mock 请求及页面验证。
