@@ -60,6 +60,12 @@ describe('business plugin semantic rules', () => {
       ...rule, fieldAssertions: [{ path: ['__proto__'], equals: '0' }]
     }] })).toThrow('unsafe')
   })
+
+  it('rejects semantic rules that the Runtime would reject', () => {
+    expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{
+      ...rule, apiUrl: '/../private'
+    }] })).toThrow('shared business control contract')
+  })
 })
 
 describe('business plugin target aliases', () => {

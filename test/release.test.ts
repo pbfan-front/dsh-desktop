@@ -181,6 +181,10 @@ describe('GitHub release contract', () => {
       to: 'business-mock-store.mjs'
     })
     expect(packageJson.build.extraResources).toContainEqual({
+      from: 'build/business-control-contract.mjs',
+      to: 'business-control-contract.mjs'
+    })
+    expect(packageJson.build.extraResources).toContainEqual({
       from: 'build/windows-hidden-console.mjs',
       to: 'windows-hidden-console.mjs'
     })

@@ -71,7 +71,7 @@ try {
     : ''
   const webRoot = typeof manifest.webRoot === 'string' ? manifest.webRoot : 'web'
   const webEntry = `build/business-package/${webRoot}/${businessPath}/index.html`
-  for (const relative of ['build/business-runtime.mjs', 'build/business-mock-store.mjs', webEntry]) {
+  for (const relative of ['build/business-runtime.mjs', 'build/business-mock-store.mjs', 'build/business-control-contract.mjs', webEntry]) {
     if (!(await exists(resolve(root, relative)))) fail(`required packaged resource is missing: ${relative}`)
     else pass(`required resource ${relative}`)
   }

@@ -334,6 +334,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | BEA-046 | P1 | Mock 实际值与插件语义规则精确比对 | 已完成，自动化与真实 Desktop Runtime 只读验收通过 | Codex | - | 对精确命中规则的候选及获准来源读取实际 Mock 标量值，区分匹配、冲突与未知；来源 ID 获准不能代替值校验。冲突或未知在确认/创建前阻止来源复用，不改变质量门阈值及最终预览验证 |
 | BEA-047 | P1 | 来源 Mock 写入前实时复核 | 已完成，自动化与真实页面端到端验收通过 | Codex | - | 确认检查点异步读取最新 Overlay/源码 Mock，不使用分析缓存；字段冲突或未知时保持确认等待且不创建 Profile。创建接口再次从当前文件复核并克隆，覆盖确认到写入的变动窗口；真实页面、请求与语义样本通过并回滚 |
 | BEA-048 | P1 | Mock 读取与语义复核模块化 | 已完成，目录安装包烟测通过 | Codex | - | 从业务 Runtime 主入口提取文件读取、精确缓存、落盘生命周期与来源语义校验；主入口仅保留编排及 Profile 写入。新模块显式进入安装包资源，保持 Overlay 优先级和原接口行为 |
+| BEA-049 | P1 | 场景创建跨进程契约第一阶段 | 已完成，自动化与目录包烟测通过 | Codex | - | 将来源语义复核请求形状、插件声明字段边界及稳定错误码收敛到同一纯模块，Desktop 主进程与业务 Runtime 共用；其他控制端点暂未迁移，避免一次性改变所有接口行为 |
 
 ## 8. 更新记录
 
@@ -382,6 +383,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-06 | BEA-047 来源实时复核 | 在方案确认前通过内部只读接口重新读取当前 Mock 文件；若分析后变更为 `duestatus=1`，Checkpoint 拒绝且保持 `waiting_for_user`。创建接口写入前再次读当前文件，并以这次读取的配置执行克隆；冲突/未知返回 `WORKFLOW_SEMANTIC_SOURCE_CHANGED` 且不创建 Profile。隔离 Runtime 脚本改写临时 Overlay 验证两层拒绝及移除 Overlay 后恢复，未修改业务源码或现有用户数据。重启开发进程后，真实来源克隆样本 `e9e3ab93-37a2-457f-ab21-e6ee00498ad2` 完成 Profile 创建、真实页面 `/repay/receiptList`、Scenario 请求命中与业务语义四项检查；Profile 已回滚。首次端到端尝试因验收脚本只读内联方案数据而误报，改为读取实际安装 Overlay 后复测通过。显式路由样本不计为自然语言消歧能力。 |
 | 2026-10-07 | BEA-048 Mock 读取模块化 | 将 Mock 配置缓存、最新文件读取、语义规则校验及缓存关闭落盘移入 `build/business-mock-store.mjs`；`business-runtime.mjs` 保持原 HTTP、分析、Profile 写入边界。`extraResources` 增加新模块，发布测试及预检断言安装包资源存在。独立 Runtime 回归、全量 142 个测试文件（1217 项）、构建、类型检查和业务包一致性检查通过；包内实际加载结果见下一条。 |
 | 2026-10-07 | BEA-048 开发版目录包验收 | `npm run package:dev:dir` 完成 macOS arm64 开发版目录包构建与签名（未公证）；`dist-dev/mac-arm64/DSH Desktop Dev.app/Contents/Resources/` 中确认 `business-runtime.mjs` 和 `business-mock-store.mjs` 均存在。`node scripts/smoke-packaged-business.mjs 'dist-dev/mac-arm64/DSH Desktop Dev.app/Contents/Resources'` 使用包内 Node 启动业务 Runtime，业务入口 `/mm2606290/` 返回 HTTP 200、`text/html` 和非空内容。烟测使用独立临时用户目录并清理；未验证可见 GUI 或正式安装器。 |
+| 2026-10-07 | BEA-049 跨进程契约第一阶段 | 新增纯 `business-control-contract.mjs`，统一来源校验请求与精确规则的参数限制，并由主进程和业务 Runtime 使用同一实现；路由歧义、值未验证和来源变更错误码集中定义。发布资源及预检包含该模块，单元测试、全量回归和独立 Runtime 回归覆盖有效请求与不匹配目标拒绝。使用 `CSC_IDENTITY_AUTO_DISCOVERY=false npm run package:dev:dir` 构建未签名 macOS arm64 开发目录包，包内包含协议模块；包内 Node 启动业务 Runtime 的烟测返回 HTTP 200。只收敛场景创建的语义复核边界，其余接口待按风险逐步迁移；未做可见 GUI 或正式安装器验收。 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |

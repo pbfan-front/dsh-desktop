@@ -370,6 +370,10 @@
         "to": "business-mock-store.mjs"
       },
       {
+        "from": "build/business-control-contract.mjs",
+        "to": "business-control-contract.mjs"
+      },
+      {
         "from": "build/business-package",
         "to": "business-package"
       },

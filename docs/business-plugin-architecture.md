@@ -123,3 +123,5 @@ Agent 插件现提供 `business_start_scenario_workflow`、`business_resume_scen
 BEA-047 进一步在 `confirm-plan` 接受前从当前 Overlay/业务包文件重新读取所选来源，不使用分析缓存；若字段冲突、缺失或来源不存在，仍停在确认步骤，不写 Profile。`create-profile` 接口在写入前重复读取并检查，并从复核后的最新文件克隆，防止确认与写入之间出现过期来源。校验只针对精确命中的插件规则与所选来源；旧运行没有新规则快照时保持原契约。复核通过不替代真实 Mock 请求及页面验证。
 
 运行时中的 Mock 文件读取、精确元数据缓存、关闭时落盘和来源语义复核现收敛到 `build/business-mock-store.mjs`。业务 Runtime 负责路由、分析和 Profile 写入，只通过明确的 `read`、`readFresh`、语义检查及关闭接口使用该模块。`readFresh` 不使用分析缓存，Overlay 优先级仍由模块内部保持；新模块与运行时入口一起作为安装包资源打包。
+
+场景创建控制协议第一阶段使用纯模块 `build/business-control-contract.mjs` 作为单一校验实现：Desktop 主进程通过 `src/shared/business-control-contract.ts` 复用，业务 Runtime 直接导入打包副本。插件语义规则安装校验也复用同一断言边界，避免安装时接受、运行时拒绝。当前统一的是插件语义断言的字段边界、来源复核请求形状及路由歧义/来源失效错误码；其他控制端点仍沿用原有独立校验，不能据此宣称所有业务接口已统一。新协议模块加入 `extraResources` 和发布预检，避免开发态通过但安装包缺文件。

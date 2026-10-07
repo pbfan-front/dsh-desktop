@@ -1,3 +1,5 @@
+import { validSemanticExpectations } from '../shared/business-control-contract'
+
 export const BUSINESS_PLUGIN_TYPE = 'dsh-business-plugin' as const
 
 export const businessPluginCapabilities = [
@@ -194,7 +196,11 @@ export function parseBusinessPluginSemanticRules(manifest: Record<string, unknow
     if (fieldAssertions.length === 0 && sourceScenarioIds.length === 0) {
       throw new Error(`Semantic rule ${id} has no assertions or source scenarios.`)
     }
-    return { id, routePath, intentEquals, apiUrl, fieldAssertions, sourceScenarioIds }
+    const parsed = { id, routePath, intentEquals, apiUrl, fieldAssertions, sourceScenarioIds }
+    if (!validSemanticExpectations([parsed], routePath, intentEquals)) {
+      throw new Error(`Semantic rule ${id} does not satisfy the shared business control contract.`)
+    }
+    return parsed
   })
 }
 

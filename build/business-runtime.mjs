@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, relative, isAbsolute, extname } from 'node:path'
 import { createBusinessMockStore } from './business-mock-store.mjs'
+import { BUSINESS_CONTROL_ERROR, validSemanticSourceRequest } from './business-control-contract.mjs'
 
 // This process serves an exported package only. It does not launch npm or a dev server.
 export async function startBusinessRuntime({ packageRoot, userRoot, token, port = 0 }) {
@@ -559,7 +560,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!normalized) return undefined
       const exact = codeRoutes.filter(route => routeAliases(route).includes(normalized))
       if (exact.length === 1) return result(exact[0], source, 'high')
-      if (exact.length > 1) throw targetResolutionError('E_TARGET_ROUTE_AMBIGUOUS', `Multiple routes exactly match ${hint}.`, exact)
+      if (exact.length > 1) throw targetResolutionError(BUSINESS_CONTROL_ERROR.targetRouteAmbiguous, `Multiple routes exactly match ${hint}.`, exact)
       const fuzzy = codeRoutes.filter(route => {
         return routeAliases(route).some(alias => alias.length >= 2 && (normalized.includes(alias) || alias.includes(normalized)))
       }).sort((left, right) => Math.max(...routeAliases(right).map(alias => alias.length))
@@ -569,7 +570,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         const topLength = Math.max(...routeAliases(fuzzy[0]).filter(alias => normalized.includes(alias) || alias.includes(normalized)).map(alias => alias.length))
         const top = fuzzy.filter(route => Math.max(...routeAliases(route).filter(alias => normalized.includes(alias) || alias.includes(normalized)).map(alias => alias.length)) === topLength)
         if (top.length === 1) return result(top[0], source, 'medium', fuzzy)
-        throw targetResolutionError('E_TARGET_ROUTE_AMBIGUOUS', `The target ${hint} matches multiple business pages. Select an exact route or page.`, fuzzy)
+        throw targetResolutionError(BUSINESS_CONTROL_ERROR.targetRouteAmbiguous, `The target ${hint} matches multiple business pages. Select an exact route or page.`, fuzzy)
       }
       return undefined
     }
@@ -1533,12 +1534,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           let body = ''
           for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
           const input = JSON.parse(body)
-          if (!safeRoute(input?.routePath) || !validSemanticExpectations(input?.semanticExpectations, input.routePath, input.query)
-            || !Array.isArray(input.scenarios) || input.scenarios.length > 12) return respond(res, 422, { error: 'Invalid semantic source validation request' })
+          if (!validSemanticSourceRequest(input)) return respond(res, 422, { error: 'Invalid semantic source validation request' })
           const result = await checkFreshSemanticSources(input.semanticExpectations, input.scenarios)
           return respond(res, result.status === 'matched' ? 200 : 422, result.status === 'matched' ? result : {
             error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before confirming the plan.',
-            code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+            code: BUSINESS_CONTROL_ERROR.semanticSourceChanged, ...result
           })
         }
         if (url.pathname === '/__desktop/resolve-target' && req.method === 'POST') {
@@ -1610,7 +1610,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             const result = await checkFreshSemanticSources(sourceRules, input.scenarios)
             if (result.status !== 'matched') return respond(res, 422, {
               error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before creating a Profile.',
-              code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+              code: BUSINESS_CONTROL_ERROR.semanticSourceChanged, ...result
             })
           }
           const analysis = analysisEvidence.get(input.evidenceId)
@@ -1651,7 +1651,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
               const result = checkScenarioSemanticValues(sourceRules, item, sourceScenario)
               if (result.status !== 'matched') return respond(res, 422, {
                 error: 'Source Scenario Mock values changed or cannot be verified; re-analyze before creating a Profile.',
-                code: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED', ...result
+                code: BUSINESS_CONTROL_ERROR.semanticSourceChanged, ...result
               })
             }
             const template = existing.config.baseData || existingScenarios[0]?.data

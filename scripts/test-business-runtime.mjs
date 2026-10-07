@@ -195,6 +195,8 @@ try {
   const validateSource = () => get('/__desktop/validate-semantic-source', { method: 'POST', headers: workflowHeaders,
     body: JSON.stringify(validationInput) })
   assert.equal((await validateSource()).status, 200)
+  assert.equal((await get('/__desktop/validate-semantic-source', { method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify({ ...validationInput, query: '其他业务状态' }) })).status, 422)
   const receiptRelative = 'src/baseTypes/api/loanNbr/loanNbr/mock.json'
   const receiptOverlay = resolve(userRoot, receiptRelative)
   const receiptSource = JSON.parse(await readFile(resolve(packageSourceRoot, receiptRelative), 'utf8'))

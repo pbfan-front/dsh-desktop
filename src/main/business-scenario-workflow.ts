@@ -10,6 +10,7 @@ import type { BusinessControlPath } from './business-preview'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessPluginWorkflowDeclaration } from './business-plugin-contract'
 import type { BusinessPluginSemanticRule } from './business-plugin-contract'
+import { BUSINESS_CONTROL_ERROR, validSemanticSourceRequest } from '../shared/business-control-contract'
 
 export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
@@ -74,6 +75,10 @@ export function registerBusinessScenarioWorkflow(options: {
         scenario.apiUrl === rule.apiUrl && scenario.sourceScenarioId))
       assertAnalysisQuality(analysis)
       const target = parseTarget(context.target)
+      if (sourceRules.length && !validSemanticSourceRequest({ routePath: target.routePath, query: input.query,
+        semanticExpectations: sourceRules, scenarios: plan.scenarios.filter(scenario => scenario.sourceScenarioId) })) {
+        throw new Error('Semantic source validation request does not satisfy the shared business control contract.')
+      }
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
       const created = await options.requestBusiness('/__desktop/create-profile', {
         evidenceId,
@@ -115,17 +120,21 @@ export function registerBusinessScenarioWorkflow(options: {
         assertSemanticSourceValues(rules, plan, record(context.analysis, 'Workflow analysis result is missing.'))
         const sourceRules = rules.filter(rule => rule.fieldAssertions.length && plan.scenarios.some(scenario =>
           scenario.apiUrl === rule.apiUrl && scenario.sourceScenarioId))
-        if (sourceRules.length) await options.requestBusiness('/__desktop/validate-semantic-source', {
+        const request = {
           routePath: parseTarget(context.target).routePath,
           query: parseStartInput(context).query,
           semanticExpectations: sourceRules,
           scenarios: plan.scenarios.filter(scenario => scenario.sourceScenarioId)
-        }, parseStartInput(context).sessionId)
+        }
+        if (sourceRules.length) {
+          if (!validSemanticSourceRequest(request)) throw new Error('Semantic source validation request does not satisfy the shared business control contract.')
+          await options.requestBusiness('/__desktop/validate-semantic-source', request, parseStartInput(context).sessionId)
+        }
       }
     } : undefined,
     retryValidators: {
       'analyze-target': ({ error, retryInput }) => {
-        if (error.code !== 'E_TARGET_ROUTE_AMBIGUOUS') {
+        if (error.code !== BUSINESS_CONTROL_ERROR.targetRouteAmbiguous) {
           if (retryInput !== undefined) throw new Error('Target selection is only accepted for an ambiguous route failure.')
           return {}
         }
@@ -196,7 +205,7 @@ function assertSemanticSourceValues(rules: BusinessPluginSemanticRule[], plan: B
         (value as Record<string, unknown>).status === 'matched')
       if (!verified) throw Object.assign(new Error(
         `Source Scenario ${scenario.sourceScenarioId} has not passed the declared value checks for semantic rule ${rule.id}; use a verified source or review a direct Mock payload.`
-      ), { code: 'WORKFLOW_SEMANTIC_VALUE_UNVERIFIED', retryable: false })
+      ), { code: BUSINESS_CONTROL_ERROR.semanticValueUnverified, retryable: false })
     }
   }
 }

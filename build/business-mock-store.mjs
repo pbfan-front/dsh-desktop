@@ -1,5 +1,6 @@
 import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { validSemanticExpectations } from './business-control-contract.mjs'
 
 // Runtime-owned Mock reads and semantic checks. No Profile mutation occurs here.
 export async function createBusinessMockStore({ source, userRoot, manifest, atomicJson, apiMockRelative, scenarioArray }) {
@@ -82,18 +83,6 @@ export async function createBusinessMockStore({ source, userRoot, manifest, atom
     }
     return null
   }
-  const validSemanticExpectations = (rules, routePath, query) => Array.isArray(rules) && rules.length <= 16 && rules.every(rule =>
-    plainObject(rule) && safeText(rule.id, 128) && rule.routePath === routePath && rule.intentEquals === query
-    && safeRoute(rule.apiUrl) && Array.isArray(rule.fieldAssertions) && rule.fieldAssertions.length <= 16
-    && rule.fieldAssertions.every(assertion => plainObject(assertion) && Array.isArray(assertion.path)
-      && assertion.path.length >= 1 && assertion.path.length <= 12
-      && assertion.path.every(part => typeof part === 'number'
-        ? Number.isSafeInteger(part) && part >= 0 && part <= 1000
-        : typeof part === 'string' && /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part)
-          && !['__proto__', 'constructor', 'prototype'].includes(part))
-      && (assertion.equals === null || ['string', 'number', 'boolean'].includes(typeof assertion.equals)))
-    && Array.isArray(rule.sourceScenarioIds) && rule.sourceScenarioIds.length <= 32
-    && rule.sourceScenarioIds.every(id => safeText(id, 128)))
   const checkScenarioSemanticValues = (rules, item, sourceScenario) => {
     const applicable = rules.filter(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
     if (!applicable.length) return { status: 'matched' }
