@@ -8,6 +8,7 @@ export const BUSINESS_CONTROL_ERROR = Object.freeze({
 const plainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const safeText = (value, max = 120) => typeof value === 'string' && value.trim().length > 0 && value.length <= max
 const safeRoute = value => typeof value === 'string' && /^\/[a-zA-Z0-9_./-]*$/.test(value) && !value.includes('..') && !value.startsWith('//')
+const safeProfileId = value => typeof value === 'string' && /^[a-zA-Z][a-zA-Z0-9_-]{1,63}$/.test(value)
 
 export const validSemanticExpectations = (rules, routePath, query) => Array.isArray(rules) && rules.length <= 16 && rules.every(rule =>
   plainObject(rule) && safeText(rule.id, 128) && rule.routePath === routePath && rule.intentEquals === query
@@ -29,3 +30,17 @@ export const validSemanticSourceRequest = input => plainObject(input)
   && Array.isArray(input.scenarios) && input.scenarios.length >= 1 && input.scenarios.length <= 12
   && input.scenarios.every(item => plainObject(item) && safeRoute(item.apiUrl)
     && safeText(item.sourceScenarioId, 128))
+
+export const profileCreationRequestError = input => {
+  if (!plainObject(input) || !plainObject(input.profile) || !safeProfileId(input.profile.id)) return 'Invalid profile id'
+  if (!safeText(input.profile.label) || !safeText(input.profile.page, 64) || !safeRoute(input.profile.routePath)) {
+    return 'profile requires a non-empty label, page and safe absolute routePath'
+  }
+  if (!Array.isArray(input.scenarios) || input.scenarios.length < 1 || input.scenarios.length > 12) {
+    return 'scenarios must contain 1-12 items'
+  }
+  if (!validSemanticExpectations(input.semanticExpectations ?? [], input.profile.routePath, input.query)) {
+    return 'Invalid semantic expectations for Profile creation'
+  }
+  return null
+}

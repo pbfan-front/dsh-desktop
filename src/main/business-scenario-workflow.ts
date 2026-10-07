@@ -10,7 +10,7 @@ import type { BusinessControlPath } from './business-preview'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessPluginWorkflowDeclaration } from './business-plugin-contract'
 import type { BusinessPluginSemanticRule } from './business-plugin-contract'
-import { BUSINESS_CONTROL_ERROR, validSemanticSourceRequest } from '../shared/business-control-contract'
+import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticSourceRequest } from '../shared/business-control-contract'
 
 export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
@@ -80,7 +80,7 @@ export function registerBusinessScenarioWorkflow(options: {
         throw new Error('Semantic source validation request does not satisfy the shared business control contract.')
       }
       const evidenceId = text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.')
-      const created = await options.requestBusiness('/__desktop/create-profile', {
+      const request = {
         evidenceId,
         ...(sourceRules.length ? { query: input.query } : {}),
         profile: {
@@ -92,7 +92,10 @@ export function registerBusinessScenarioWorkflow(options: {
         },
         scenarios: plan.scenarios,
         ...(sourceRules.length ? { semanticExpectations: sourceRules } : {})
-      }, input.sessionId)
+      }
+      const requestError = profileCreationRequestError(request)
+      if (requestError) throw new Error(`Profile creation request does not satisfy the shared business control contract: ${requestError}`)
+      const created = await options.requestBusiness('/__desktop/create-profile', request, input.sessionId)
       return { output: created, contextPatch: { profileId: plan.profileId, plan } }
     },
     'apply-profile': async ({ context }) => {

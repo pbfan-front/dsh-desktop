@@ -470,6 +470,12 @@ try {
   assert.ok(analyzedApi, JSON.stringify(analysis).slice(0, 4000))
   assert.ok(analyzedApi.envelopeFields.includes('status'))
   assert.ok(analyzedApi.fields.some(field => field.includes('array')))
+  const invalidProfileEnvelope = await get('/__desktop/create-profile', { method: 'POST', headers, body: JSON.stringify({
+    evidenceId: analysis.evidenceId, profile: { id: 'a'.repeat(65), label: 'Too long', page: 'productCombine', routePath: '/credit/productCombine' },
+    scenarios: [{ id: 'valid_scenario', apiUrl: '/refactor/queryMultiEnterpriseListII.json', data: {} }]
+  }) })
+  assert.equal(invalidProfileEnvelope.status, 422)
+  assert.equal((await invalidProfileEnvelope.json()).error, 'Invalid profile id')
   let checked = 0
   if (profile) {
     childMessages.length = 0

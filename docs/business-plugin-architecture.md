@@ -125,3 +125,5 @@ BEA-047 进一步在 `confirm-plan` 接受前从当前 Overlay/业务包文件�
 运行时中的 Mock 文件读取、精确元数据缓存、关闭时落盘和来源语义复核现收敛到 `build/business-mock-store.mjs`。业务 Runtime 负责路由、分析和 Profile 写入，只通过明确的 `read`、`readFresh`、语义检查及关闭接口使用该模块。`readFresh` 不使用分析缓存，Overlay 优先级仍由模块内部保持；新模块与运行时入口一起作为安装包资源打包。
 
 场景创建控制协议第一阶段使用纯模块 `build/business-control-contract.mjs` 作为单一校验实现：Desktop 主进程通过 `src/shared/business-control-contract.ts` 复用，业务 Runtime 直接导入打包副本。插件语义规则安装校验也复用同一断言边界，避免安装时接受、运行时拒绝。当前统一的是插件语义断言的字段边界、来源复核请求形状及路由歧义/来源失效错误码；其他控制端点仍沿用原有独立校验，不能据此宣称所有业务接口已统一。新协议模块加入 `extraResources` 和发布预检，避免开发态通过但安装包缺文件。
+
+第二阶段统一创建 Profile 请求的外壳校验：Profile ID、标签/页面/安全路由、1–12 条场景以及精确语义规则的目标匹配由同一 `profileCreationRequestError` 实现，主进程发送前与业务 Runtime 收到后各检查一次。具体 Scenario 数据、证据 ID、API 绑定、Mock 文件读取及落盘仍由 Runtime 验证；它们不属于这次跨进程共享的字段契约。

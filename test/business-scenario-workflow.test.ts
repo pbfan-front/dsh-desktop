@@ -235,6 +235,18 @@ describe('business scenario workflow', () => {
     expect(requestBusiness).toHaveBeenCalledTimes(2)
   })
 
+  it('rejects a Profile id beyond the Runtime contract before making the write request', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-long-profile' })
+    const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target' ? resolvedTarget : ({ evidenceId: 'evidence-1' }))
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    const failed = await runtime.resume(analyzed.id, { profileId: 'a'.repeat(65), label: '测试', page: 'receiptList',
+      scenarios: [{ id: 'receipt_data', apiUrl: '/loanNbr/loanNbr.json', data: {} }] })
+    expect(failed.status).toBe('failed')
+    expect(failed.steps[2]?.error?.message).toContain('Invalid profile id')
+    expect(requestBusiness).toHaveBeenCalledTimes(2)
+  })
+
   it('blocks writes deterministically when analysis quality is insufficient', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-insufficient-analysis' })
     const requestBusiness = vi.fn(async (path: string) => {

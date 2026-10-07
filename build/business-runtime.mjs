@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, relative, isAbsolute, extname } from 'node:path'
 import { createBusinessMockStore } from './business-mock-store.mjs'
-import { BUSINESS_CONTROL_ERROR, validSemanticSourceRequest } from './business-control-contract.mjs'
+import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticSourceRequest } from './business-control-contract.mjs'
 
 // This process serves an exported package only. It does not launch npm or a dev server.
 export async function startBusinessRuntime({ packageRoot, userRoot, token, port = 0 }) {
@@ -1601,11 +1601,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           let body = ''
           for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
           const input = JSON.parse(body)
-          if (!safeId(input?.profile?.id)) return respond(res, 422, { error: 'Invalid profile id' })
-          if (!safeText(input.profile.label) || !safeText(input.profile.page, 64) || !safeRoute(input.profile.routePath)) return respond(res, 422, { error: 'profile requires a non-empty label, page and safe absolute routePath' })
-          if (!Array.isArray(input.scenarios) || input.scenarios.length < 1 || input.scenarios.length > 12) return respond(res, 422, { error: 'scenarios must contain 1-12 items' })
+          const requestError = profileCreationRequestError(input)
+          if (requestError) return respond(res, 422, { error: requestError })
           const sourceRules = input.semanticExpectations ?? []
-          if (!validSemanticExpectations(sourceRules, input.profile.routePath, input.query)) return respond(res, 422, { error: 'Invalid semantic expectations for Profile creation' })
           if (sourceRules.length) {
             const result = await checkFreshSemanticSources(sourceRules, input.scenarios)
             if (result.status !== 'matched') return respond(res, 422, {

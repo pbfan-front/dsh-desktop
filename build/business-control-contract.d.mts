@@ -5,3 +5,4 @@ export const BUSINESS_CONTROL_ERROR: Readonly<{
 }>
 export function validSemanticExpectations(rules: unknown, routePath: unknown, query: unknown): boolean
 export function validSemanticSourceRequest(input: unknown): boolean
+export function profileCreationRequestError(input: unknown): string | null

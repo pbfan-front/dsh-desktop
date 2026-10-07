@@ -335,6 +335,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | BEA-047 | P1 | 来源 Mock 写入前实时复核 | 已完成，自动化与真实页面端到端验收通过 | Codex | - | 确认检查点异步读取最新 Overlay/源码 Mock，不使用分析缓存；字段冲突或未知时保持确认等待且不创建 Profile。创建接口再次从当前文件复核并克隆，覆盖确认到写入的变动窗口；真实页面、请求与语义样本通过并回滚 |
 | BEA-048 | P1 | Mock 读取与语义复核模块化 | 已完成，目录安装包烟测通过 | Codex | - | 从业务 Runtime 主入口提取文件读取、精确缓存、落盘生命周期与来源语义校验；主入口仅保留编排及 Profile 写入。新模块显式进入安装包资源，保持 Overlay 优先级和原接口行为 |
 | BEA-049 | P1 | 场景创建跨进程契约第一阶段 | 已完成，自动化与目录包烟测通过 | Codex | - | 将来源语义复核请求形状、插件声明字段边界及稳定错误码收敛到同一纯模块，Desktop 主进程与业务 Runtime 共用；其他控制端点暂未迁移，避免一次性改变所有接口行为 |
+| BEA-050 | P1 | 创建 Profile 请求外壳契约 | 已完成，自动化与目录包烟测通过 | Codex | - | 主进程与业务 Runtime 共用 Profile ID、标签/页面/路由、场景数量和精确语义目标校验；保留原 422 错误文案。具体 Scenario 数据、证据、API 绑定及落盘校验仍归 Runtime，不扩大为全接口协议 |
 
 ## 8. 更新记录
 
@@ -384,6 +385,7 @@ KYC、摄像头、视频、上传等外部能力仍依赖业务代码零散的 `
 | 2026-10-07 | BEA-048 Mock 读取模块化 | 将 Mock 配置缓存、最新文件读取、语义规则校验及缓存关闭落盘移入 `build/business-mock-store.mjs`；`business-runtime.mjs` 保持原 HTTP、分析、Profile 写入边界。`extraResources` 增加新模块，发布测试及预检断言安装包资源存在。独立 Runtime 回归、全量 142 个测试文件（1217 项）、构建、类型检查和业务包一致性检查通过；包内实际加载结果见下一条。 |
 | 2026-10-07 | BEA-048 开发版目录包验收 | `npm run package:dev:dir` 完成 macOS arm64 开发版目录包构建与签名（未公证）；`dist-dev/mac-arm64/DSH Desktop Dev.app/Contents/Resources/` 中确认 `business-runtime.mjs` 和 `business-mock-store.mjs` 均存在。`node scripts/smoke-packaged-business.mjs 'dist-dev/mac-arm64/DSH Desktop Dev.app/Contents/Resources'` 使用包内 Node 启动业务 Runtime，业务入口 `/mm2606290/` 返回 HTTP 200、`text/html` 和非空内容。烟测使用独立临时用户目录并清理；未验证可见 GUI 或正式安装器。 |
 | 2026-10-07 | BEA-049 跨进程契约第一阶段 | 新增纯 `business-control-contract.mjs`，统一来源校验请求与精确规则的参数限制，并由主进程和业务 Runtime 使用同一实现；路由歧义、值未验证和来源变更错误码集中定义。发布资源及预检包含该模块，单元测试、全量回归和独立 Runtime 回归覆盖有效请求与不匹配目标拒绝。使用 `CSC_IDENTITY_AUTO_DISCOVERY=false npm run package:dev:dir` 构建未签名 macOS arm64 开发目录包，包内包含协议模块；包内 Node 启动业务 Runtime 的烟测返回 HTTP 200。只收敛场景创建的语义复核边界，其余接口待按风险逐步迁移；未做可见 GUI 或正式安装器验收。 |
+| 2026-10-07 | BEA-050 创建 Profile 外壳契约 | 同一纯模块校验 Desktop 发送前和 Runtime 接收后的 Profile ID、标签/页面/路由、场景数量及语义目标；不迁移证据、Scenario 数据与写入规则。单元、全量、类型、业务一致性、独立 Runtime 和发布预检通过；重新构建未签名 macOS arm64 目录包并完成包内 Runtime HTTP 200 烟测。未进行可见 GUI 或正式安装器验收。 |
 | 2026-09-26 | 启动 BEA-001 统一业务构建流水线 | `business:sync` 默认重建路由、索引、业务 Web 和 Mock Platform；新增显式 `business:export` |
 | 2026-09-26 | 完成 BEA-001 全流程验收 | 路由、CodeIntell、业务 Web、Mock Platform、原子导出和清单校验均成功 |
 | 2026-09-26 | 实现 BEA-002 侧栏业务热更新 | 开发模式由 `dev:business` 统一启动，安装包不接受开发 URL 注入；待真实 GUI/HMR 验收后关闭任务 |
