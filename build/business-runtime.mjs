@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, relative, isAbsolute, extname } from 'node:path'
+import { createBusinessMockStore } from './business-mock-store.mjs'
 
 // This process serves an exported package only. It does not launch npm or a dev server.
 export async function startBusinessRuntime({ packageRoot, userRoot, token, port = 0 }) {
@@ -253,128 +254,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const scenarioArray = config => Array.isArray(config?.scenarios)
     ? config.scenarios
     : Object.entries(config?.scenarios || {}).map(([id, value]) => ({ ...value, id }))
-  const mockConfigCacheFile = join(userRoot, '.mock-config-cache.json')
-  const mockConfigFileCache = new Map()
-  const mockConfigCacheStats = { hits: 0, misses: 0, invalidations: 0, restoredHits: 0 }
-  let mockConfigCacheDirty = false
-  try {
-    const persisted = JSON.parse(await readFile(mockConfigCacheFile, 'utf8'))
-    if (persisted?.schemaVersion === 1 && persisted.projectId === manifest.projectId
-      && persisted.buildId === manifest.buildId && persisted.sourceRoot === source && Array.isArray(persisted.entries)) {
-      for (const entry of persisted.entries.slice(-500)) {
-        if (!plainObject(entry) || typeof entry.file !== 'string' || typeof entry.fingerprint !== 'string' || !plainObject(entry.config)) continue
-        mockConfigFileCache.set(entry.file, { fingerprint: entry.fingerprint, config: entry.config, restored: true })
-      }
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') console.warn(`[business-runtime] ignored invalid Mock config cache: ${error.message}`)
-  }
-  let mockConfigCachePersistQueue = Promise.resolve()
-  let mockConfigCachePersistTimer
-  const persistMockConfigCache = async () => {
-    if (mockConfigCacheDirty) {
-      mockConfigCacheDirty = false
-      const document = { schemaVersion: 1, projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source,
-        entries: [...mockConfigFileCache.entries()].map(([file, value]) => ({ file, fingerprint: value.fingerprint, config: value.config })) }
-      mockConfigCachePersistQueue = mockConfigCachePersistQueue.catch(() => {}).then(() => atomicJson(mockConfigCacheFile, document)).catch(error => {
-        mockConfigCacheDirty = true
-        console.warn(`[business-runtime] failed to persist Mock config cache: ${error.message}`)
-      })
-    }
-    await mockConfigCachePersistQueue
-  }
-  const scheduleMockConfigCachePersistence = () => {
-    if (mockConfigCachePersistTimer) return
-    mockConfigCachePersistTimer = setTimeout(() => {
-      mockConfigCachePersistTimer = undefined
-      void persistMockConfigCache()
-    }, 500)
-    mockConfigCachePersistTimer.unref()
-  }
-  const readCachedMockFile = async file => {
-    let metadata
-    try { metadata = await stat(file) } catch (error) {
-      if (error.code === 'ENOENT') {
-        if (mockConfigFileCache.delete(file)) mockConfigCacheDirty = true
-        return null
-      }
-      throw error
-    }
-    const fingerprint = `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
-    const cached = mockConfigFileCache.get(file)
-    if (cached?.fingerprint === fingerprint) {
-      mockConfigCacheStats.hits += 1
-      if (cached.restored) mockConfigCacheStats.restoredHits += 1
-      return { file, config: cached.config }
-    }
-    if (cached) mockConfigCacheStats.invalidations += 1
-    const config = JSON.parse(await readFile(file, 'utf8'))
-    mockConfigCacheStats.misses += 1
-    mockConfigFileCache.set(file, { fingerprint, config, restored: false })
-    mockConfigCacheDirty = true
-    while (mockConfigFileCache.size > 500) mockConfigFileCache.delete(mockConfigFileCache.keys().next().value)
-    return { file, config }
-  }
-  const readMockConfig = async relativePath => {
-    for (const file of [join(userRoot, relativePath), join(source, relativePath)]) {
-      const result = await readCachedMockFile(file)
-      if (result) return result
-    }
-    return null
-  }
-  const readFreshMockConfig = async relativePath => {
-    for (const file of [join(userRoot, relativePath), join(source, relativePath)]) {
-      try { return { file, config: JSON.parse(await readFile(file, 'utf8')) } }
-      catch (error) { if (error.code !== 'ENOENT') throw error }
-    }
-    return null
-  }
-  const validSemanticExpectations = (rules, routePath, query) => Array.isArray(rules) && rules.length <= 16 && rules.every(rule =>
-    plainObject(rule) && safeText(rule.id, 128) && rule.routePath === routePath && rule.intentEquals === query
-    && safeRoute(rule.apiUrl) && Array.isArray(rule.fieldAssertions) && rule.fieldAssertions.length <= 16
-    && rule.fieldAssertions.every(assertion => plainObject(assertion) && Array.isArray(assertion.path)
-      && assertion.path.length >= 1 && assertion.path.length <= 12
-      && assertion.path.every(part => typeof part === 'number'
-        ? Number.isSafeInteger(part) && part >= 0 && part <= 1000
-        : typeof part === 'string' && /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(part)
-          && !['__proto__', 'constructor', 'prototype'].includes(part))
-      && (assertion.equals === null || ['string', 'number', 'boolean'].includes(typeof assertion.equals)))
-    && Array.isArray(rule.sourceScenarioIds) && rule.sourceScenarioIds.length <= 32
-    && rule.sourceScenarioIds.every(id => safeText(id, 128)))
-  const checkScenarioSemanticValues = (rules, item, sourceScenario) => {
-    const applicable = rules.filter(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
-    if (!applicable.length) return { status: 'matched' }
-    if (!sourceScenario) return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId }
-    for (const rule of applicable) {
-      if (!rule.sourceScenarioIds.includes(item.sourceScenarioId)) return { status: 'conflict', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id }
-      for (const assertion of rule.fieldAssertions) {
-        let value = sourceScenario.data
-        let present = true
-        for (const part of assertion.path) {
-          if (!value || typeof value !== 'object' || !Object.hasOwn(value, part)) { present = false; break }
-          value = value[part]
-        }
-        if (!present || (value !== null && !['string', 'number', 'boolean'].includes(typeof value))) {
-          return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id, path: assertion.path }
-        }
-        if (value !== assertion.equals) return { status: 'conflict', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId, ruleId: rule.id, path: assertion.path }
-      }
-    }
-    return { status: 'matched' }
-  }
-  const checkFreshSemanticSources = async (rules, scenarios) => {
-    for (const item of scenarios) {
-      if (!item?.sourceScenarioId) continue
-      const applicable = rules.filter(rule => rule.apiUrl === item.apiUrl && rule.fieldAssertions.length)
-      if (!applicable.length) continue
-      if (!safeRoute(item.apiUrl) || !safeText(item.sourceScenarioId, 128)) return { status: 'unknown', apiUrl: item.apiUrl, scenarioId: item.sourceScenarioId }
-      const existing = await readFreshMockConfig(apiMockRelative(item.apiUrl))
-      const sourceScenario = existing && scenarioArray(existing.config).find(value => value.id === item.sourceScenarioId)
-      const result = checkScenarioSemanticValues(rules, item, sourceScenario)
-      if (result.status !== 'matched') return result
-    }
-    return { status: 'matched' }
-  }
+  const mockStore = await createBusinessMockStore({ source, userRoot, manifest, atomicJson, apiMockRelative, scenarioArray })
+  const { read: readMockConfig, readFresh: readFreshMockConfig, validSemanticExpectations,
+    checkScenarioSemanticValues, checkFreshSemanticSources } = mockStore
   const sourceTextFileCache = new Map()
   const sourceTextCacheStats = { hits: 0, misses: 0, invalidations: 0 }
   const readCachedSourceText = async relativePath => {
@@ -929,7 +811,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const rankedCandidates = [...apiMap.values()].sort((a, b) => b.score - a.score).slice(0, 100)
     const preparationConcurrency = 8
     const preparationStartedAt = Date.now()
-    const cacheStatsBeforePreparation = { ...mockConfigCacheStats }
+    const cacheStatsBeforePreparation = { ...mockStore.stats }
     const preparedCandidates = []
     for (let index = 0; index < rankedCandidates.length; index += preparationConcurrency) {
       const preparedBatch = await Promise.all(rankedCandidates.slice(index, index + preparationConcurrency).map(async candidate => {
@@ -953,11 +835,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       durationMs: Date.now() - preparationStartedAt,
       mockConfigCache: {
         strategy: 'filesystem-metadata-validated',
-        hits: mockConfigCacheStats.hits - cacheStatsBeforePreparation.hits,
-        misses: mockConfigCacheStats.misses - cacheStatsBeforePreparation.misses,
-        invalidations: mockConfigCacheStats.invalidations - cacheStatsBeforePreparation.invalidations,
-        restoredHits: mockConfigCacheStats.restoredHits - cacheStatsBeforePreparation.restoredHits,
-        entries: mockConfigFileCache.size,
+        hits: mockStore.stats.hits - cacheStatsBeforePreparation.hits,
+        misses: mockStore.stats.misses - cacheStatsBeforePreparation.misses,
+        invalidations: mockStore.stats.invalidations - cacheStatsBeforePreparation.invalidations,
+        restoredHits: mockStore.stats.restoredHits - cacheStatsBeforePreparation.restoredHits,
+        entries: mockStore.cacheEntries,
         maxEntries: 500,
         persistence: 'user-root-exact-fingerprint',
         persistenceScheduling: 'debounced-background-with-close-flush',
@@ -1346,7 +1228,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       hintScheduleMs = roundDuration(performance.now() - hintSortedAt)
     }
     const hintUpdatedAt = performance.now()
-    scheduleMockConfigCachePersistence()
+    mockStore.schedulePersistence()
     const mockScheduledAt = performance.now()
     result.analysisTimings = {
       reused: false,
@@ -1946,11 +1828,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       process.off('message', handleWorkflowResponse)
       for (const pending of workflowRequests.values()) { clearTimeout(pending.timer); pending.reject(new Error('Business runtime is stopping')) }
       workflowRequests.clear()
-      if (mockConfigCachePersistTimer) {
-        clearTimeout(mockConfigCachePersistTimer)
-        mockConfigCachePersistTimer = undefined
-      }
-      await persistMockConfigCache()
+      await mockStore.close()
       await flushAnalysisCache()
       server.closeAllConnections(); await new Promise(done => server.close(done)); await next.close()
     } }

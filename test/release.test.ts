@@ -177,6 +177,10 @@ describe('GitHub release contract', () => {
       to: 'icon.png'
     })
     expect(packageJson.build.extraResources).toContainEqual({
+      from: 'build/business-mock-store.mjs',
+      to: 'business-mock-store.mjs'
+    })
+    expect(packageJson.build.extraResources).toContainEqual({
       from: 'build/windows-hidden-console.mjs',
       to: 'windows-hidden-console.mjs'
     })

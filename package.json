@@ -366,6 +366,10 @@
         "to": "business-runtime.mjs"
       },
       {
+        "from": "build/business-mock-store.mjs",
+        "to": "business-mock-store.mjs"
+      },
+      {
         "from": "build/business-package",
         "to": "business-package"
       },
