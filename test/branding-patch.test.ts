@@ -7,25 +7,27 @@ const projectRoot = path.resolve(import.meta.dirname, '..')
 
 describe('DSH Desktop sidebar branding', () => {
 
-  it('uses an 80px macOS rail that clears the traffic lights', async () => {
-    const patch = await readFile(
-      patchPath('@deepseek-ai/dsh-client-ui-layout'),
+  it('uses upstream platform-aware collapsed titlebar spacing', async () => {
+    const client = await readFile(
+      path.join(projectRoot, 'node_modules/@deepseek-ai/dsh-client-ui-layout/lib/client.js'),
       'utf8'
     )
 
-    expect(patch).toContain('navigator.userAgent.includes("Macintosh") ? 80 : 56')
-    expect(patch).toContain('sidebar === 0 ? COLLAPSED_SIDEBAR_WIDTH')
+    expect(client).toContain('document.documentElement.dataset.platform === "darwin"')
+    expect(client).toContain('document.documentElement.hasAttribute("data-windows-titlebar") ? 0 : 56')
+    expect(client).toContain('sidebar === 0 ? collapsedWidth')
   })
 
-  it('keeps the Windows right sidebar below the native caption controls', async () => {
+  it('uses the upstream Windows caption row rather than a sidebar overlay', async () => {
     const titlebar = await readFile(
       path.join(projectRoot, 'src', 'preload', 'windows-titlebar.ts'),
       'utf8'
     )
 
-    expect(titlebar).toContain('[data-sidebar-right-panel]')
-    expect(titlebar).toContain('top: 36px !important')
-    expect(titlebar).toContain("panel.style.setProperty('top', '36px', 'important')")
+    expect(titlebar).toContain('markWindowsTitlebar(document)')
+    expect(titlebar).toContain("root.dataset.windowsTitlebar = ''")
+    expect(titlebar).toContain('mountWindowsMenuBar({ document, ipcRenderer })')
+    expect(titlebar).not.toContain('[data-sidebar-right-panel]')
   })
 
   it('keeps the phone entry aligned at the right edge of the settings row', async () => {

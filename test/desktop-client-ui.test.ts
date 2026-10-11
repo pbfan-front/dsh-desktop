@@ -13,7 +13,7 @@ interface Registration {
 describe('DSH Desktop client slot occupants', () => {
   it('supports the preload-published business URL when a context bridge is unavailable', async () => {
     const [client, preload] = await Promise.all([
-      readFile(path.join(projectRoot, 'packages', 'dsh-desktop-client-ui', 'client.js'), 'utf8'),
+      readFile(path.join(projectRoot, 'packages', 'dsh-desktop-business-ui', 'client.js'), 'utf8'),
       readFile(path.join(projectRoot, 'src', 'preload', 'index.ts'), 'utf8')
     ])
 
@@ -62,9 +62,11 @@ describe('DSH Desktop client slot occupants', () => {
       }
     } | undefined
     const appended: Array<{ textContent?: string }> = []
+    const removeStyle = vi.fn()
+    let disposeStyle: (() => void) | undefined
     const document = {
       getElementById: vi.fn(() => null),
-      createElement: vi.fn(() => ({ id: '', dataset: {}, textContent: '' })),
+      createElement: vi.fn(() => ({ id: '', dataset: {}, textContent: '', remove: removeStyle })),
       head: { appendChild: (node: { textContent?: string }) => appended.push(node) }
     }
     vm.runInNewContext(source, {
@@ -121,43 +123,23 @@ describe('DSH Desktop client slot occupants', () => {
         return () => undefined
       }
     }
-    const tabDefinitions: Array<{ id: string; kind: string }> = []
-    const sidebarRight = { openTab: vi.fn() }
-    const locale = {
-      register: vi.fn(() => () => undefined),
-      bind: vi.fn(() => (key: string) => key)
-    }
-    const sidebarRightTabs = {
-      register: (definition: { id: string; kind: string }) => {
-        tabDefinitions.push(definition)
-        return () => undefined
-      }
-    }
-    plugin.apply({
-      slots,
-      sidebarRight,
-      sidebarRightTabs,
-      locale,
-      effect: (effect: () => unknown) => effect()
-    })
+    plugin.apply({ slots, effect: (setup: () => (() => void) | undefined) => { disposeStyle = setup() } })
 
-    expect(plugin.inject).toEqual(['slots', 'sidebarRight', 'sidebarRightTabs', 'locale'])
+    expect(plugin.inject).toEqual(['slots', 'remote.session', 'sessions', 'uiWorkspace'])
     expect(registrations.map(({ config }) => config.name)).toEqual([
-      'sidebar.right.pane.tab',
-      'sidebar.right.pane.tab',
       'sidebar.brand.mark',
       'sidebar.brand.name',
       'conversation.hero.brand.mark',
-      'conversation.session.header.actions'
+      'sidebar.right.tab.document.unpreviewable',
+      'sidebar.workspaces.session.menu.item',
+      'sidebar.workspaces.session.menu.item',
+      'sidebar.workspaces.session.menu.item'
     ])
-    expect(tabDefinitions).toHaveLength(2)
-    expect(tabDefinitions[0]).toMatchObject({ id: 'dsh-desktop-business-preview', kind: 'business-preview' })
-    expect(tabDefinitions[1]).toMatchObject({ id: 'dsh-desktop-business-workflows', kind: 'business-workflows' })
-    expect(locale.register).toHaveBeenCalledOnce()
-    expect(registrations.find(({ config }) => config.id === 'business-preview')).toBeUndefined()
-    expect(registrations.find(({ config }) => config.id === 'business-sidebar-preview')?.config.order).toBe(81)
-    // The mark is drawn in currentColor; the only stylesheet belongs to the workflow panel.
+    // Desktop toolbar styles have an owned lifetime; branding stays in currentColor.
     expect(appended).toHaveLength(1)
+    expect(appended[0]?.textContent).toContain("[data-dsh-preset-search]")
+    disposeStyle?.()
+    expect(removeStyle).toHaveBeenCalledOnce()
 
     const sidebarName = registrations.find(
       ({ config }) => config.name === 'sidebar.brand.name'

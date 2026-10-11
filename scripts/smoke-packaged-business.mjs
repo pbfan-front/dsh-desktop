@@ -1,8 +1,9 @@
 import { fork } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { get } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const resources = resolve(process.argv[2] ?? '')
 if (!process.argv[2]) {
@@ -10,10 +11,15 @@ if (!process.argv[2]) {
   process.exit(2)
 }
 
-const executable = process.platform === 'win32' ? 'node.exe' : 'node'
 const runtime = join(resources, 'business-runtime.mjs')
 const packageRoot = join(resources, 'business-package')
-const node = join(resources, 'app', 'node_modules', 'node', 'bin', executable)
+const product = process.env.DSH_DESKTOP_PRODUCT_NAME || 'DSH Desktop'
+const node = process.platform === 'darwin'
+  ? join(dirname(resources), 'Frameworks', `${product} Helper.app`, 'Contents', 'MacOS', `${product} Helper`)
+  : process.platform === 'win32'
+    ? join(resources, '..', `${product}.exe`)
+    : join(resources, '..', product.toLowerCase().replaceAll(' ', '-'))
+if (!existsSync(node)) throw new Error(`Packaged Electron Node executable not found: ${node}`)
 const manifest = JSON.parse(await readFile(join(packageRoot, 'manifest.json'), 'utf8'))
 const userRoot = await mkdtemp(join(tmpdir(), 'dsh-packaged-business-'))
 const token = 'packaged-business-smoke-token-00000000000000000000'
@@ -24,7 +30,7 @@ const child = fork(runtime, [packageRoot], {
   execPath: node,
   execArgv: [],
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }
 })
 child.stderr?.on('data', (data) => { stderr += String(data) })
 

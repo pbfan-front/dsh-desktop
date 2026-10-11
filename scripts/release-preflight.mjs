@@ -60,7 +60,7 @@ try {
 
   if (!semver.test(packageJson.version ?? '')) fail(`invalid Desktop version: ${packageJson.version}`)
   else pass(`Desktop version ${packageJson.version}`)
-  if (builder.asar !== false) fail('release contract currently requires asar=false for packaged runtime access')
+  if (builder.asar !== true) fail('release contract requires asar=true with business runtime in extraResources')
   else pass('packaging layout matches runtime contract')
   if (builder.appId !== 'io.dsh.desktop') fail(`unexpected production appId: ${builder.appId}`)
   else pass(`production appId ${builder.appId}`)

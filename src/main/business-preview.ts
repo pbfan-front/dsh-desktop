@@ -102,6 +102,7 @@ export class BusinessPreview {
       execPath: this.options.node, execArgv: [], stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
         ...childEnv,
+        ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         DSH_BUSINESS_TOKEN: token,
         DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken,
         DSH_BUSINESS_SOURCE_ROOT: this.options.sourceRoot,

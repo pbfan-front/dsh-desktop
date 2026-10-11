@@ -13,7 +13,7 @@ describe('business target selection over the process bridge', () => {
     const token = randomBytes(32).toString('hex')
     const workflowToken = randomBytes(32).toString('hex')
     const child = fork(resolve('build/business-runtime.mjs'), [resolve('build/business-package')], {
-      execPath: resolve('node_modules/node/bin/node'), execArgv: [],
+      execPath: process.execPath, execArgv: [],
       env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken,
         DSH_BUSINESS_USER_ROOT: userRoot },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc']

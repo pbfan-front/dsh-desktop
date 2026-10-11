@@ -36,7 +36,7 @@ await writeFile(resolve(legacyProfileDir, 'mock-profiles.json'), JSON.stringify(
 }] }))
 await writeFile(legacyMockFile, JSON.stringify(legacyMockConfig))
 const child = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
-  execPath: resolve('node_modules/node/bin/node'), execArgv: [],
+  execPath: process.execPath, execArgv: [],
   env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot }, stdio: ['ignore', 'pipe', 'pipe', 'ipc']
 })
 child.stderr.on('data', data => process.stderr.write(data))
@@ -645,7 +645,7 @@ try {
   const persistedAnalysisCache = JSON.parse(await readFile(resolve(userRoot, 'analysis-candidate-cache.json'), 'utf8'))
   assert.ok(Object.keys(persistedAnalysisCache.entries).length > 0)
   const restartedChild = fork(resolve('build/business-runtime.mjs'), [packageRoot], {
-    execPath: resolve('node_modules/node/bin/node'), execArgv: [],
+    execPath: process.execPath, execArgv: [],
     env: { ...process.env, DSH_BUSINESS_TOKEN: token, DSH_BUSINESS_WORKFLOW_TOKEN: workflowToken, DSH_BUSINESS_USER_ROOT: userRoot },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc']
   })

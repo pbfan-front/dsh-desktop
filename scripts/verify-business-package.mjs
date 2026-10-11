@@ -77,8 +77,8 @@ try {
   failures.push(`cannot verify business project at ${businessRoot}: ${error.message}`)
 }
 
-const sourceClient = join(desktopRoot, 'packages', 'dsh-desktop-client-ui', 'client.js')
-const installedClient = join(desktopRoot, 'node_modules', 'dsh-desktop-client-ui', 'client.js')
+const sourceClient = join(desktopRoot, 'packages', 'dsh-desktop-business-ui', 'client.js')
+const installedClient = join(desktopRoot, 'node_modules', 'dsh-desktop-business-ui', 'client.js')
 check(await sha256(sourceClient) === await sha256(installedClient), 'local desktop client package is stale; run npm install')
 const clientText = await readFile(installedClient, 'utf8')
 check(clientText.includes('business-sidebar-preview') && clientText.includes('侧栏体验'), 'desktop client does not contain the sidebar experience entry')
