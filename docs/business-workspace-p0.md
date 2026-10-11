@@ -10,6 +10,9 @@
 - 业务静态资源和 Mock 请求只允许访问本机服务；控制接口使用随机令牌。
 - 退出、更新 Desktop 时只停止 Desktop 自己创建的业务进程。
 
+创建体验分支与启用体验分支是两个动作。场景工作流确认方案后只新增用户 Profile/Scenario，不调用应用接口，也不重载当前预览；当前默认分支或用户已选分支保持不变。新分支出现在场景列表后，用户明确点击“体验”才切换。工作流停在预览验证检查点，不能把“已创建”误报为“已验证”；选择并实际加载后再继续验证。旧版工作流运行采用同拓扑版本兼容，创建后的自动应用行为仅对新执行步骤取消。
+场景列表始终展示“默认分支”。当前应用了 Profile 时，点击“返回默认”会清除当前 Harness 会话的 Profile 选择并在原业务路由重新加载无 Profile 的预览；用户创建的 Profile/Scenario 仍留在列表，可再次点击“体验”。这不会清除其他会话、用户数据或 Mock 文件。
+
 P1 已提供独立用户场景目录，以及分析、创建、应用、验证和回滚工具。创建前必须调用 `business_analyze_target`：服务按精确路由读取 CodeIntell 的页面、Interactor、API caller 和同业务域证据，返回候选接口、已有 Mock、响应外层和业务字段，并签发 30 分钟有效的 `evidenceId`；`business_create_profile` 只接受该次分析确认的路由和接口，不能凭模型猜测接口。受控业务工具的所有写入仅落到 Desktop userData，不修改内置源码；macOS 签名要求打包输入可写，因此不能用文件 `0444` 作为发布方案，最终不可变边界由签名 App 完整性和工具授权共同保证。已有 API Mock 会被复用；如果 API 已由 CodeIntell/源码证据确认、尚无 `mock.json` 且存在可解析的 `Rsp.ts`，服务可在用户 Overlay 生成带标准响应信封的首个基础 Mock。每个 Profile 对同一 API 只允许一个场景绑定；服务会拒绝重复 `data` 包裹和非法路由，并在写入后通过真实中间件请求验证 Profile/Scenario 命中。任一步骤失败都会恢复全部已修改文件。页面验证同时检查当前 Profile、绑定场景的真实请求命中、iframe 当前路由以及必须出现/不得出现的可见文案。Profile、路由、页面观察和请求证据已按 Harness 对话隔离；侧栏按钮自动传递当前 `sessionId`，iframe 通过同源 Cookie 选择对应状态。尚未完成正式签名公证和干净机器验收。
 
 用户 Profile 和 Scenario 使用 Schema v2。业务运行时启动时会迁移 v1 数据，并记录创建场景时所依据的业务 Build ID 和内置 Mock 指纹。升级后的内置 Mock 结构兼容时自动更新基线；字段不兼容或内置 API 被移除时标记为 `needs-repair` 并阻止应用，不会静默使用错误数据。`business_user_data_status` 可查看迁移、冲突和用户目录，`business_export_scenarios` 导出不含凭据的便携 JSON 包，`business_import_scenarios` 在另一台电脑原子导入并返回可回滚的 operationId。

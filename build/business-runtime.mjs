@@ -1394,7 +1394,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (req.headers['sec-fetch-site'] === 'cross-site') return respond(res, 403, { error: 'Cross-site request' })
       if (url.pathname.startsWith('/__desktop/')) {
         const publicRead = req.method === 'GET' && ['/__desktop/state', '/__desktop/result-ui'].includes(url.pathname)
-        const trustedUI = ['/__desktop/apply-ui', '/__desktop/page-observation-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
+        const trustedUI = ['/__desktop/apply-ui', '/__desktop/default-ui', '/__desktop/page-observation-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
         if (!publicRead && !trustedUI && req.headers.authorization !== `Bearer ${token}`) return respond(res, 401, { error: 'Unauthorized' })
         if (url.pathname.startsWith('/__desktop/workflow/') && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
@@ -1725,6 +1725,25 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           }
           if (resetSessionIds.length) await persistSessionStates()
           return respond(res, 200, { operationId, status: 'rolled-back', resetSessionIds })
+        }
+        if (url.pathname === '/__desktop/default-ui' && req.method === 'POST') {
+          let route = manifest.entryRoute
+          try { route = new URL(state.url).hash.replace(/^#/, '') || route } catch {}
+          const [routePath, routeQuery = ''] = route.split('?')
+          if (!routePath.startsWith('/') || routePath.startsWith('//')) return respond(res, 422, { error: 'Invalid current route' })
+          const routeParams = new URLSearchParams(routeQuery)
+          routeParams.delete('__mockProfile')
+          routeParams.delete('__previewReload')
+          const cleanRoute = `${routePath}${routeParams.size ? `?${routeParams}` : ''}`
+          const target = new URL(businessAppUrl(cleanRoute))
+          target.searchParams.delete('__mockProfile')
+          target.searchParams.set('__dshSession', sessionId)
+          state = { revision: state.revision + 1, profileId: '', url: target.href, verified: false }
+          sessionStates.set(sessionId, state)
+          await persistSessionStates()
+          pageObservations.delete(sessionId)
+          verificationResults.delete(sessionId)
+          return respond(res, 200, { ...state, status: 'default' })
         }
         if (['/__desktop/apply', '/__desktop/apply-ui'].includes(url.pathname) && req.method === 'POST') {
           let body = ''

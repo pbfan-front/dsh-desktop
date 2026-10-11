@@ -16,14 +16,14 @@ export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
 const defaultDefinition: BusinessWorkflowDefinition = {
   id: BUSINESS_SCENARIO_WORKFLOW_ID,
-  version: '1.2.0',
+  version: '1.3.0',
   title: '创建并验证业务体验场景',
   steps: [
     { id: 'analyze-target', type: 'deterministic', title: '分析页面与接口证据' },
     { id: 'confirm-plan', type: 'checkpoint', title: '确认 Mock 场景方案' },
     { id: 'create-profile', type: 'deterministic', title: '创建 Mock Profile' },
-    { id: 'apply-profile', type: 'deterministic', title: '应用 Mock Profile' },
-    { id: 'wait-for-preview', type: 'checkpoint', title: '等待业务页面加载完成' },
+    { id: 'apply-profile', type: 'deterministic', title: '等待用户选择体验分支' },
+    { id: 'wait-for-preview', type: 'checkpoint', title: '用户选择分支后验证预览' },
     { id: 'verify-preview', type: 'deterministic', title: '验证真实请求和页面结果', gate: 'business.preview-verification' }
   ]
 }
@@ -99,10 +99,10 @@ export function registerBusinessScenarioWorkflow(options: {
       return { output: created, contextPatch: { profileId: plan.profileId, plan } }
     },
     'apply-profile': async ({ context }) => {
-      const input = parseStartInput(context)
       const profileId = text(context.profileId, 'Workflow profileId is missing.')
-      const applied = await options.requestBusiness('/__desktop/apply', { profileId }, input.sessionId)
-      return { output: applied }
+      // Creation must never activate a branch. The preview keeps its current
+      // profile until the user explicitly chooses this Profile in the UI.
+      return { output: { profileId, status: 'available', activation: 'user-selection-required' } }
     },
     'verify-preview': async ({ context, previousOutput }) => {
       const input = parseStartInput(context)

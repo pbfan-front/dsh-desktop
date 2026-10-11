@@ -483,6 +483,13 @@ try {
     assert.equal(uiApplied.status, 200)
     const appliedResponse = await get('/__desktop/apply', { method: 'POST', headers, body: JSON.stringify({ profileId: profile.id }) })
     assert.equal(appliedResponse.status, 200)
+    assert.equal((await get('/__desktop/default-ui', { method: 'POST' })).status, 401)
+    const defaultResponse = await get('/__desktop/default-ui', { method: 'POST', headers: { Origin: ready.origin, 'Sec-Fetch-Site': 'same-origin' } })
+    assert.equal(defaultResponse.status, 200)
+    const defaultState = await defaultResponse.json()
+    assert.equal(defaultState.profileId, '')
+    assert.ok(!defaultState.url.includes('__mockProfile='))
+    assert.equal((await (await get('/__desktop/state')).json()).profileId, '')
     await new Promise(done => setTimeout(done, 20))
     assert.ok(!childMessages.some(item => item?.type === 'show-preview'), 'Profile apply must stay in the persistent sidebar preview')
   }

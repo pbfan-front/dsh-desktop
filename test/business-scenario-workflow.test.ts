@@ -109,23 +109,22 @@ describe('business scenario workflow', () => {
     wallMs += 2000
     const completed = await runtime.resume(applied.id, verification)
     const summary = summarizeBusinessScenarioTiming(completed)
-    expect(summary).toMatchObject({ status: 'completed', elapsedMs: 7130, activeMs: 130, checkpointWaitMs: 7000 })
+    expect(summary).toMatchObject({ status: 'completed', elapsedMs: 7120, activeMs: 120, checkpointWaitMs: 7000 })
     expect(summary?.phases).toMatchObject({
       resolveTargetMs: 20, analyzeTargetMs: 80, confirmPlanWaitMs: 5000,
-      createProfileMs: 10, applyProfileMs: 10, previewWaitMs: 2000, verifyPreviewMs: 10
+      createProfileMs: 10, applyProfileMs: 0, previewWaitMs: 2000, verifyPreviewMs: 10
     })
     expect(summarizeBusinessScenarioTiming(JSON.parse(JSON.stringify(completed)))).toEqual(summary)
     expect(summarizeBusinessScenarioTiming({ ...completed, workflowId: 'other-workflow' })).toBeUndefined()
   })
 
-  it('connects analysis, confirmed creation, apply and page verification in order', async () => {
+  it('creates a branch without applying it, then verifies only after explicit selection', async () => {
     let sequence = 0
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => `run-${++sequence}` })
     const requestBusiness = vi.fn(async (path: string) => {
       if (path === '/__desktop/resolve-target') return resolvedTarget
       if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-1', apis: ['/quota/query.json'] }
       if (path === '/__desktop/create-profile') return { operationId: 'operation-1', profileId: plan.profileId }
-      if (path === '/__desktop/apply') return { status: 'applied-command' }
       return { verified: true, checks: {
         currentProfile: true,
         observationCurrent: true,
@@ -162,14 +161,17 @@ describe('business scenario workflow', () => {
       profile: expect.objectContaining({ id: plan.profileId, routePath: resolvedTarget.routePath }),
       scenarios: plan.scenarios
     }), startInput.sessionId)
-    expect(requestBusiness).toHaveBeenNthCalledWith(4, '/__desktop/apply', { profileId: plan.profileId }, startInput.sessionId)
+    expect(requestBusiness.mock.calls.some(([path]) => path === '/__desktop/apply')).toBe(false)
+    expect(applied.steps.find(step => step.id === 'apply-profile')?.output).toMatchObject({
+      profileId: plan.profileId, status: 'available', activation: 'user-selection-required'
+    })
 
     const completed = await runtime.resume(applied.id, verification)
     expect(completed.status).toBe('completed')
     expect(completed.steps.map((step) => step.status)).toEqual([
       'completed', 'completed', 'completed', 'completed', 'completed', 'completed'
     ])
-    expect(requestBusiness).toHaveBeenNthCalledWith(5, '/__desktop/verify', verification, startInput.sessionId)
+    expect(requestBusiness).toHaveBeenNthCalledWith(4, '/__desktop/verify', verification, startInput.sessionId)
   })
 
   it('allows a cross-page page hint to resolve the target without forcing the current preview route', async () => {
@@ -298,7 +300,7 @@ describe('business scenario workflow', () => {
     expect(requestBusiness).toHaveBeenCalledTimes(2)
     const correctedPlan = { ...badPlan, scenarios: [{ ...badPlan.scenarios[0], data: { data: { list: [{ duestatus: '0' }] } } }] }
     expect((await runtime.resume(analyzed.id, correctedPlan)).status).toBe('waiting_for_user')
-    expect(requestBusiness).toHaveBeenCalledTimes(4)
+    expect(requestBusiness).toHaveBeenCalledTimes(3)
   })
 
   it('accepts a matching direct payload or explicitly approved source Scenario', async () => {

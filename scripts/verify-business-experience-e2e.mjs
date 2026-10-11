@@ -75,6 +75,10 @@ try {
   assert.equal(accepted.body.currentStepId, 'wait-for-preview')
   operationId = accepted.body.steps.find(step => step.id === 'create-profile')?.output?.operationId
   assert.match(operationId, /^[0-9a-f-]{36}$/)
+  // Creating a branch no longer activates it. This test explicitly opts in
+  // before collecting page and request evidence.
+  const applied = await post('/__desktop/apply', { profileId })
+  assert.equal(applied.status, 200, JSON.stringify(applied.body))
 
   chromeRoot = await mkdtemp(join(tmpdir(), 'dsh-bea043-chrome-'))
   const url = new URL(descriptor.origin)
