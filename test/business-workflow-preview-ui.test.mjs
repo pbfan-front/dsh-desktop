@@ -208,7 +208,7 @@ it('does not update an unmounted panel or retain its workflow listener', async (
   await act(async () => button('verifyPage').click())
   await unmount()
   await act(async () => { release(); await page.hold })
-  expect(listeners.size).toBe(1) // Only the plugin-owned route-choice subscription remains until disposal.
+  expect(listeners.size).toBe(0) // No automatic opener or unmounted panel listener remains.
 })
 
 it.each(['confirm-plan', 'legacy-single-page', 'cancelled', 'incompatible', 'missing-bridge'])('does not expose an unsafe verification action for %s', async state => {

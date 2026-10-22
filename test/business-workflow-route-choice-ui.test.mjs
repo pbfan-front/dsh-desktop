@@ -79,7 +79,7 @@ it('requires a deliberate route choice before retrying the same workflow run', a
     expect(openTab).not.toHaveBeenCalled()
     expect(container.querySelector('.dshWorkflowRouteChoice')).toBeNull()
     await act(async () => listeners.forEach(listener => listener(initialRun)))
-    expect(openTab).toHaveBeenCalledExactlyOnceWith('business-workflows')
+    expect(openTab).not.toHaveBeenCalled() // Diagnostics must not interrupt the conversation.
     expect(container.querySelector('.dshWorkflowRouteChoice')).not.toBeNull()
     await act(async () => root.render(panelForSession('other-conversation')))
     expect(document.documentElement.dataset.dshBusinessSessionId).toBe('other-conversation')

@@ -3,7 +3,8 @@ import { randomBytes } from 'node:crypto'
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { parseBusinessPreviewEvidence } from '../src/shared/business-preview-evidence'
 import { registerBusinessScenarioWorkflow } from '../src/main/business-scenario-workflow'
 import { BusinessWorkflowRuntime } from '../src/main/business-workflow-runtime'
 import { approveBusinessScenarioPlan, proposeBusinessScenarioPlan } from '../src/main/business-scenario-plan'
@@ -52,11 +53,13 @@ describe('business target selection over the process bridge', () => {
     }
     const start = registerBusinessScenarioWorkflow({ runtime, pluginId: manifest.pluginId, requestBusiness, semanticRules })
     const previousConnection = process.env.DSH_BUSINESS_CONNECTION_FILE
+    const observed: unknown[] = []
     const ready = new Promise<void>((resolveReady, rejectReady) => {
       const timeout = setTimeout(() => rejectReady(new Error(`Business runtime did not start: ${output}`)), 30000)
       child.on('message', (message: unknown) => {
         if (!message || typeof message !== 'object') return
         const event = message as Record<string, unknown>
+        if (event.type === 'preview-evidence') observed.push(event.evidence)
         if (event.type === 'ready' && typeof event.origin === 'string') {
           origin = event.origin
           clearTimeout(timeout)
@@ -112,6 +115,18 @@ describe('business target selection over the process bridge', () => {
         return { status: response.status, body: await response.json() as Record<string, any> }
       }
       const query = '借据列表正常展示：同一卡片显示借据号和正常。创建后不自动选中。'
+      const observation = { route: '/repay/receiptList', title: 'Read-only fixture', text: 'Private page text' }
+      expect((await post('/__desktop/page-observation-ui', observation)).status).toBe(202)
+      await vi.waitFor(() => expect(observed).toHaveLength(1))
+      const wakeup = parseBusinessPreviewEvidence(observed[0])
+      expect(wakeup).toMatchObject({ sessionId, route: observation.route, profileId: null, fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      expect(JSON.stringify(observed)).not.toContain('Private page text')
+      expect((await post('/__desktop/page-observation-ui', observation)).status).toBe(202)
+      await vi.waitFor(() => expect(observed).toHaveLength(2))
+      expect(parseBusinessPreviewEvidence(observed[1])?.fingerprint).toBe(wakeup?.fingerprint)
+      expect((await post('/__desktop/page-observation-ui', { ...observation, text: 'Changed page text' })).status).toBe(202)
+      await vi.waitFor(() => expect(observed).toHaveLength(3))
+      expect(parseBusinessPreviewEvidence(observed[2])?.fingerprint).not.toBe(wakeup?.fingerprint)
       const started = await post('/__desktop/workflow/start-scenario', { query })
       expect(started.status).toBe(200)
       expect(started.body.status).toBe('failed')

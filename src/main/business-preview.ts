@@ -3,6 +3,7 @@ import { fork, type ChildProcess } from 'node:child_process'
 import { mkdir, writeFile, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { parseBusinessPreviewEvidence, type BusinessPreviewEvidence } from '../shared/business-preview-evidence'
 
 export type BusinessPreviewState = {
   phase: 'stopped' | 'starting' | 'ready' | 'recovering' | 'failed'
@@ -38,7 +39,7 @@ export class BusinessPreview {
   private stableTimer?: NodeJS.Timeout
   private recoveryAttempts: number[] = []
   private state: BusinessPreviewState = { phase: 'stopped', attempt: 0 }
-  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; developmentAppUrl?: string; log: (text: string) => void; onStateChange?: (state: BusinessPreviewState) => void; onWorkflowCommand?: (command: BusinessWorkflowCommand) => Promise<unknown> }) {}
+  constructor(private options: { packageRoot: string; sourceRoot: string; userRoot: string; entry: string; node: string; connectionFile: string; developmentAppUrl?: string; log: (text: string) => void; onStateChange?: (state: BusinessPreviewState) => void; onPreviewEvidence?: (evidence: BusinessPreviewEvidence) => void; onWorkflowCommand?: (command: BusinessWorkflowCommand) => Promise<unknown> }) {}
 
   snapshot(): BusinessPreviewState {
     return { ...this.state }
@@ -136,8 +137,13 @@ export class BusinessPreview {
           this.token = token
           this.workflowToken = workflowToken
           child.on('message', (nextMessage: any) => {
+            if (this.child !== child) return
             if (nextMessage?.type === 'show-preview') void this.show().catch(error => this.options.log(`Unable to show business preview: ${error}`))
             if (nextMessage?.type === 'workflow-request') void this.handleWorkflowRequest(child, nextMessage)
+            if (nextMessage?.type === 'preview-evidence') {
+              const evidence = parseBusinessPreviewEvidence(nextMessage.evidence)
+              if (evidence) this.options.onPreviewEvidence?.(evidence)
+            }
           })
           clearTimeout(timer)
           if (this.stableTimer) clearTimeout(this.stableTimer)

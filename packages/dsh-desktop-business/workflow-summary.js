@@ -115,9 +115,9 @@ export function compactBusinessWorkflowRun(run, options = {}) {
   }
   if (run === null) return null
   if (!object(run) || typeof run.id !== 'string' || !run.id) throw new Error('Invalid business workflow response; no raw response was returned.')
-  const context = pick(run.context, options.proposalOnly ? ['sessionId', 'routePath', 'target', 'profileId']
+  const context = pick(run.context, options.proposalOnly ? ['sessionId', 'routePath', 'target', 'profileId', 'experienceFlowVersion']
     : ['query', 'targetPage', 'routePath', 'apiUrls', 'sessionId', 'target', 'targetSelection',
-      'semanticIntentContract', 'intentResolution', 'semanticExpectations', 'profileId'])
+      'semanticIntentContract', 'intentResolution', 'semanticExpectations', 'profileId', 'experienceFlowVersion'])
   const result = { ...pick(run, ['id', 'workflowId', 'workflowVersion', 'pluginId', 'status', 'currentStepId', 'createdAt', 'updatedAt', 'compatibility']),
     context, ...(run.checkpointProposal ? { checkpointProposal: proposalSummary(run.checkpointProposal) } : {}) }
   if (!options.proposalOnly) {

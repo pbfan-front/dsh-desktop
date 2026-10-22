@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AvailableRelease, UpdateStatus } from '../shared/contracts'
 import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRouteSelection, BusinessWorkflowRun, BusinessWorkflowProposalApproval } from '../shared/business-workflow'
+import type { BusinessPreviewEvidence } from '../shared/business-preview-evidence'
 import { setupDesktopStoragePersistence } from './desktop-storage'
 import {
   isUpdateDismissed,
@@ -626,7 +627,7 @@ contextBridge.exposeInMainWorld(
     restartBusinessPreview: (): Promise<{ ok: boolean; url: string }> => ipcRenderer.invoke('business:restart-preview'),
     startBusinessScenarioWorkflow: (input: BusinessScenarioWorkflowStartInput): Promise<{ run: BusinessWorkflowRun }> =>
       ipcRenderer.invoke('business-workflow:start-scenario', input),
-    businessWorkflowRuns: (): Promise<{ runs: BusinessWorkflowRun[] }> => ipcRenderer.invoke('business-workflow:list'),
+    businessWorkflowRuns: (sessionId?: string): Promise<{ runs: BusinessWorkflowRun[] }> => ipcRenderer.invoke('business-workflow:list', sessionId),
     businessWorkflowRun: (runId: string): Promise<{ run: BusinessWorkflowRun | null }> => ipcRenderer.invoke('business-workflow:get', runId),
     resumeBusinessWorkflow: (runId: string, checkpointOutput?: unknown): Promise<{ run: BusinessWorkflowRun }> =>
       ipcRenderer.invoke('business-workflow:resume', runId, checkpointOutput),
@@ -639,6 +640,11 @@ contextBridge.exposeInMainWorld(
       const handler = (_event: Electron.IpcRendererEvent, run: BusinessWorkflowRun): void => listener(run)
       ipcRenderer.on('business-workflow:changed', handler)
       return () => ipcRenderer.removeListener('business-workflow:changed', handler)
+    },
+    onBusinessPreviewEvidence: (listener: (evidence: BusinessPreviewEvidence) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, evidence: BusinessPreviewEvidence): void => listener(evidence)
+      ipcRenderer.on('business:preview-evidence', handler)
+      return () => ipcRenderer.removeListener('business:preview-evidence', handler)
     },
     showHarnessLog: (): Promise<void> => ipcRenderer.invoke('harness:show-log')
   })

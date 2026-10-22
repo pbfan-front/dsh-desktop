@@ -14,7 +14,12 @@ export interface BusinessWorkflowIpcOptions {
 
 export function registerBusinessWorkflowHandlers(options: BusinessWorkflowIpcOptions): void {
   registerStartScenario(options)
-  register(options, 'business-workflow:list', (runtime) => ({ runs: runtime.listRuns() }))
+  register(options, 'business-workflow:list', (runtime, sessionId) => {
+    if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId || sessionId.length > 200)) {
+      throw new Error('Workflow sessionId is invalid.')
+    }
+    return { runs: runtime.listRuns().filter(run => sessionId === undefined || run.context.sessionId === sessionId) }
+  })
   register(options, 'business-workflow:get', (runtime, runId) => ({
     run: runtime.getRun(parseRunId(runId)) ?? null
   }))

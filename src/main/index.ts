@@ -3501,6 +3501,9 @@ async function bootstrap(): Promise<void> {
         if (action === 'resume') return businessWorkflowRuntime.resume(input.runId, input.checkpointOutput)
         if (action === 'retry') return businessWorkflowRuntime.retry(input.runId, input.retryInput)
         return businessWorkflowRuntime.cancel(input.runId)
+      },
+      onPreviewEvidence: evidence => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('business:preview-evidence', evidence)
       }
     })
     if (typeof businessManifest.pluginId === 'string' && businessWorkflowRuntime) {

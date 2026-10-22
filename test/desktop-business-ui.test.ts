@@ -55,7 +55,7 @@ describe('business sidebar plugin on Harness 0.2', () => {
     ])
     expect(tabs.flatMap(({ guide }) => guide.map(({ id }) => id))).toEqual(['business-preview', 'business-workflows'])
     expect(seats.map(({ name }) => name)).toEqual([
-      'sidebar.right.pane.tab', 'sidebar.right.pane.tab', 'conversation.session.header.actions'
+      'sidebar.right.pane.tab', 'sidebar.right.pane.tab', 'conversation.input.dock', 'conversation.session.header.actions'
     ])
     expect(openTab).not.toHaveBeenCalled()
     const action = seats.find(({ name }) => name === 'conversation.session.header.actions')?.component({ sessionId: 's1' }) as {

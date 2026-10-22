@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
     const { BrandWordmark, FishLogo } = require('@deepseek-ai/dsh-client-ui-primitives')
     const WORKFLOW_NS = 'dsh-desktop-workflow'
     const workflowZh = {
-      tab: '工作流', guide: '查看业务场景工作流的进度、证据和失败原因', scenarioWorkflow: '业务场景创建与验证', loading: '正在读取工作流…',
+      tab: '高级诊断', guide: '按需查看完整工作流记录、证据和失败原因', scenarioWorkflow: '业务场景创建与验证', loading: '正在读取工作流…',
       empty: '暂无工作流运行记录', emptyHint: '通过对话创建业务场景后，运行进度会显示在这里。',
       loadFailed: '工作流记录加载失败', retryLoad: '重新加载', updated: '更新于', steps: '执行步骤',
       route: '业务页面', profile: '体验分支', session: '关联会话', query: '目标', evidence: '证据', error: '失败原因', input: '输入摘要', output: '输出摘要',
@@ -30,11 +30,17 @@ window.__ModuleLoader__.load({
       planFull: '查看完整待确认方案（只读）', planChecks: '计划验证页面', planLegacy: '未声明分步验证，创建后使用原对话入口提交单页验证断言。',
       planQuality: '分析等级（不代表页面已验证）', planReviewRisk: '分析仍有待复核证据。请核对助手的聚焦复核结论，不能仅凭候选分数或名称确认。', planSemantic: '业务声明的字段规则（仅覆盖声明项）',
       planAcknowledge: '我已核对以上方案，确认仅新增体验分支', planConfirm: '确认并创建分支', planCreating: '正在确认并创建…', planCreated: '分支已新增，尚未启用。请在业务体验中手动选择后验证。', planEditHint: '需要修改时请回到对话说明，再提交新版本；旧版本的确认将失效。',
+      dailyTitle: '体验分支', dailyDetails: '查看方案与验收条件', dailyDiagnostics: '高级诊断', dailyTechnicalDetails: '查看技术详情', dailyOpenPreview: '打开业务体验', dailyChoosePage: '请选择目标页面', dailyRestartChecks: '重新核验本次体验', dailyRetryCheck: '重新检查',
+      dailyLoadFailed: '暂时无法读取分支进度，可打开高级诊断查看。', dailyChanged: '方案已更新，请重新核对当前版本后确认。', dailyActionFailed: '操作未完成，没有跳过校验。可查看详情，或回到对话调整方案。', dailyChunkFailed: '体验确认卡暂时无法加载，可在高级诊断中继续。', dailyReviewNotice: '请结合助手的分析核对方案；创建不代表页面已验证。',
+      dailyState_empty: '暂不可用', dailyState_confirm: '待你确认', dailyState_creating: '正在创建', dailyState_preparing: '分析中', dailyState_choosePage: '需要选择页面', dailyState_created: '已创建', dailyState_selectBranch: '已创建', dailyState_openPage: '等待体验', dailyState_checkingSoon: '等待检查', dailyState_checking: '检查中', dailyState_checkPending: '待核验', dailyState_restartChecks: '需要重新核验', dailyState_verified: '检查已通过', dailyState_failed: '需要调整', dailyState_checkFailed: '检查未通过', dailyState_cancelled: '已取消',
+      dailyHint_empty: '', dailyHint_confirm: '确认后仅新增分支，不会切换当前体验。需要修改时直接在对话中说明。', dailyHint_creating: '正在新增分支，当前体验保持不变。', dailyHint_preparing: '正在分析目标和场景，方案准备好后可在这里确认。', dailyHint_choosePage: '有多个页面符合需求，请选择要体验的页面；没有默认推荐。',
+      dailyHint_created: '分支已创建，可手动选择后体验。此记录的完整核验可在高级诊断中继续。', dailyHint_selectBranch: '分支已新增。请在业务体验中勾选它，当前选择不会自动改变。', dailyHint_openPage: '请在业务体验中打开下面的页面，进入后会自动检查。', dailyHint_checkingSoon: '页面就绪后会在后台检查，不需要打开工作流面板。', dailyHint_checking: '正在核对当前分支、接口和页面，不会提交业务操作。',
+      dailyHint_checkPending: '页面还在加载或验收条件尚未满足。可以继续体验；页面变化后会再次检查。', dailyHint_restartChecks: '分支已重新选择，旧检查不能混用。请重新核验本次体验。', dailyHint_verified: '本次保存的接口和页面检查已通过。', dailyHint_failed: '分析或创建未完成，请回到对话调整需求；详细原因可按需查看。', dailyHint_checkFailed: '分支已创建，但完整检查尚未通过，不影响继续体验。详细原因见高级诊断。', dailyHint_cancelled: '这次任务已取消，不会继续创建或自动检查。',
       pending: '待执行', running: '执行中', waiting_for_user: '等待确认', completed: '已完成', failed: '失败',
       cancelled: '已取消', skipped: '已跳过', deterministic: '确定性', agent: 'Agent', checkpoint: '检查点'
     }
     const workflowEn = {
-      tab: 'Workflows', guide: 'Inspect business workflow progress, evidence, and failures', scenarioWorkflow: 'Create and verify business scenario', loading: 'Loading workflows…',
+      tab: 'Advanced diagnostics', guide: 'Inspect full workflow records, evidence, and failures when needed', scenarioWorkflow: 'Create and verify business scenario', loading: 'Loading workflows…',
       empty: 'No workflow runs yet', emptyHint: 'Runs created through business conversations will appear here.',
       loadFailed: 'Unable to load workflow runs', retryLoad: 'Reload', updated: 'Updated', steps: 'Steps',
       route: 'Route', profile: 'Profile', session: 'Conversation', query: 'Target', evidence: 'Evidence', error: 'Failure', input: 'Input summary', output: 'Output summary',
@@ -55,6 +61,12 @@ window.__ModuleLoader__.load({
       planFull: 'Inspect the complete proposal (read-only)', planChecks: 'Planned page checks', planLegacy: 'No ordered checks declared. Use the original conversation entry to supply single-page assertions after creation.',
       planQuality: 'Analysis level (not UI verification)', planReviewRisk: 'Some evidence still needs review. Check the assistant’s focused review; candidate names and scores alone are not sufficient.', planSemantic: 'Business-declared field rules (declared fields only)',
       planAcknowledge: 'I reviewed this plan and confirm adding a Profile only', planConfirm: 'Confirm and create Profile', planCreating: 'Confirming and creating…', planCreated: 'Profile added, not activated. Select it manually in Business Preview before verification.', planEditHint: 'To change the plan, describe the revision in the conversation and submit a new version. The old confirmation will expire.',
+      dailyTitle: 'Experience branch', dailyDetails: 'Plan and acceptance checks', dailyDiagnostics: 'Advanced diagnostics', dailyTechnicalDetails: 'Technical details', dailyOpenPreview: 'Open Business Preview', dailyChoosePage: 'Choose a target page', dailyRestartChecks: 'Restart checks for this activation', dailyRetryCheck: 'Check again',
+      dailyLoadFailed: 'Branch progress is unavailable. Open advanced diagnostics for details.', dailyChanged: 'The plan changed. Review the current version before confirming.', dailyActionFailed: 'The action did not complete. No checks were bypassed. Inspect details or revise the plan in the conversation.', dailyChunkFailed: 'The confirmation card could not load. Continue in advanced diagnostics.', dailyReviewNotice: 'Review the plan alongside the assistant’s evidence. Creation is not page verification.',
+      dailyState_empty: 'Unavailable', dailyState_confirm: 'Your confirmation', dailyState_creating: 'Creating', dailyState_preparing: 'Analyzing', dailyState_choosePage: 'Choose a page', dailyState_created: 'Created', dailyState_selectBranch: 'Created', dailyState_openPage: 'Waiting for preview', dailyState_checkingSoon: 'Waiting to check', dailyState_checking: 'Checking', dailyState_checkPending: 'Not yet verified', dailyState_restartChecks: 'Recheck needed', dailyState_verified: 'Checks passed', dailyState_failed: 'Needs attention', dailyState_checkFailed: 'Checks incomplete', dailyState_cancelled: 'Cancelled',
+      dailyHint_empty: '', dailyHint_confirm: 'Confirmation only adds a branch and leaves the current selection unchanged. Describe any revisions in the conversation.', dailyHint_creating: 'Adding the branch without changing your current preview.', dailyHint_preparing: 'Analyzing the target and scenario. Confirm the prepared plan here.', dailyHint_choosePage: 'Several pages match. Choose the intended page; none is preselected or recommended.',
+      dailyHint_created: 'The branch is available for manual selection. Continue this record’s full verification in advanced diagnostics.', dailyHint_selectBranch: 'Branch added. Select it in Business Preview; the current selection will not change automatically.', dailyHint_openPage: 'Open the page below in Business Preview. Checks will run automatically after entry.', dailyHint_checkingSoon: 'The page will be checked in the background when ready. No workflow panel is needed.', dailyHint_checking: 'Checking the active branch, requests and page. No business submissions are performed.',
+      dailyHint_checkPending: 'The page is loading or the acceptance checks are not yet satisfied. Keep exploring; changes to page evidence trigger another check.', dailyHint_restartChecks: 'The branch activation changed. Restart checks instead of combining old evidence.', dailyHint_verified: 'This run’s saved request and page checks passed.', dailyHint_failed: 'Analysis or creation did not complete. Revise the request in the conversation; diagnostics are available when needed.', dailyHint_checkFailed: 'The branch is available, but full verification did not pass. You can keep exploring and inspect advanced diagnostics.', dailyHint_cancelled: 'This task was cancelled. It will not create a branch or continue automatic checks.',
       pending: 'Pending', running: 'Running', waiting_for_user: 'Waiting', completed: 'Completed', failed: 'Failed',
       cancelled: 'Cancelled', skipped: 'Skipped', deterministic: 'Deterministic', agent: 'Agent', checkpoint: 'Checkpoint'
     }
@@ -682,6 +694,29 @@ window.__ModuleLoader__.load({
 
     let ctxForBusiness
 
+    function ExperienceFlowDock(props) {
+      const [loaded, setLoaded] = React.useState({ module: null, failed: false })
+      const sessionId = props.sessionId || props.session?.id
+      React.useEffect(() => {
+        publishBusinessSession(sessionId)
+        let active = true
+        // The installed Harness supports package-local client.*.js chunks.
+        // Failure stays local to this optional card, not global app startup.
+        Promise.resolve().then(() => require.async('./client.experience-flow.js')).then(module => {
+          if (active) setLoaded({ module, failed: false })
+        }).catch(() => { if (active) setLoaded({ module: null, failed: true }) })
+        return () => { active = false }
+      }, [sessionId])
+      if (loaded.failed) return React.createElement('p', { role: 'status' }, props.t('dailyChunkFailed'),
+        React.createElement('button', { type: 'button', onClick: () => ctxForBusiness.sidebarRight.openTab('business-workflows') }, props.t('dailyDiagnostics')))
+      if (!loaded.module) return null
+      return React.createElement(loaded.module.BusinessExperienceDock, { ...props, sessionId, bridge: workflowBridge(), hostWindow: workflowHostWindow(),
+        proposalFor: workflowPlanProposal, progressFor: workflowPreviewProgress,
+        choicesFor: run => workflowNeedsRouteChoice(run) ? workflowRouteCandidates(run.steps?.find(step => step.id === run.currentStepId)) : [],
+        openPreview: () => ctxForBusiness.sidebarRight.openTab('business-preview'),
+        openDiagnostics: () => ctxForBusiness.sidebarRight.openTab('business-workflows') })
+    }
+
     const inject = ['slots', 'sidebarRight', 'sidebarRightTabs', 'locale']
     function apply(ctx) {
       ctxForBusiness = ctx
@@ -706,13 +741,10 @@ window.__ModuleLoader__.load({
         { name: 'sidebar.right.pane.tab', key: 'dsh-desktop-business-workflows', inject: () => ({ t: workflowT }) },
         WorkflowPanel
       )), 'dsh-desktop: business workflows body')
-      ctx.effect(() => workflowBridge()?.onBusinessWorkflowChanged?.(run => {
-        if (!workflowNeedsRouteChoice(run) && !workflowPlanProposal(run)) return
-        const activeSessionId = workflowHostWindow().document.documentElement.dataset.dshBusinessSessionId
-        if (activeSessionId && workflowContextFact(run.context, 'sessionId') === activeSessionId) {
-          ctx.sidebarRight.openTab('business-workflows')
-        }
-      }), 'dsh-desktop: show current conversation review checkpoints')
+      ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
+        { name: 'conversation.input.dock', id: 'business-experience-flow', order: 80, inject: () => ({ t: workflowT }) },
+        ExperienceFlowDock
+      )), 'dsh-desktop: inline experience confirmation and passive checks')
       ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register(
         { name: 'conversation.session.header.actions', id: 'business-sidebar-preview', order: 81, label: '侧栏体验' },
         BusinessSidebarAction

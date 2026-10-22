@@ -1728,6 +1728,13 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             sessionStates.set(sessionId, state)
             await persistSessionStates()
           }
+          // Wake the current conversation's passive verifier. Send no page
+          // text or credentials; the original checkpoint rechecks live proof.
+          process.send?.({ type: 'preview-evidence', evidence: { sessionId, profileId: state.profileId || null,
+            revision: state.revision, revisionId: state.revisionId, route: pageObservation.route,
+            observedAt: pageObservation.observedAt,
+            fingerprint: contentHash({ sessionId, revision: state.revision, revisionId: state.revisionId,
+              profileId: state.profileId, route: pageObservation.route, text: pageObservation.text }) } })
           return respond(res, 202, { status: 'recorded' })
         }
         if (url.pathname === '/__desktop/verify' && req.method === 'POST') {

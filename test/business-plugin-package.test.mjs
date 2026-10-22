@@ -4,9 +4,32 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import vm from 'node:vm'
 import { expect, it } from 'vitest'
 
 const exec = promisify(execFile)
+
+it('ships the experience card with its declared package-local client chunk', async () => {
+  const source = resolve('packages/dsh-desktop-business-ui')
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const { stdout } = await exec(npm, ['pack', '--dry-run', '--ignore-scripts', '--offline', '--json'], { cwd: source,
+    ...(process.platform === 'win32' ? { shell: true } : {}) })
+  const files = JSON.parse(stdout)[0].files.map(item => item.path)
+  expect(files).toContain('client.js')
+  expect(files).toContain('client.experience-flow.js')
+  const registrations = []
+  const context = { window: { __ModuleLoader__: { load: value => registrations.push(value) } } }
+  // Consume the actual distribution file list. Merely importing source entry
+  // would miss an omitted optional chunk in an installed package.
+  for (const file of files.filter(file => file === 'client.js' || file === 'client.experience-flow.js')) {
+    vm.runInNewContext(await readFile(join(source, file), 'utf8'), context)
+  }
+  const chunk = registrations.find(value => value.chunk === 'client.experience-flow.js')
+  expect(chunk.id).toBe('dsh-desktop-business-ui')
+  const exports = chunk.factory(name => { if (name === 'react') return {}; throw Error(name) })
+  expect(typeof exports.createExperienceController).toBe('function')
+  expect(typeof exports.BusinessExperienceDock).toBe('function')
+})
 
 it('ships and loads workflow helpers from a relocated package using the actual npm pack file list', async () => {
   const root = await mkdtemp(join(tmpdir(), 'business-plugin-package-'))

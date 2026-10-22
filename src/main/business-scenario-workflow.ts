@@ -232,7 +232,7 @@ export function registerBusinessScenarioWorkflow(options: {
   return (input) => options.runtime.start({
     workflowId: BUSINESS_SCENARIO_WORKFLOW_ID,
     pluginId: options.pluginId,
-    context: { ...parseStartInput(input), semanticIntentContract: 1 }
+    context: { ...parseStartInput(input), semanticIntentContract: 1, experienceFlowVersion: 1 }
   })
 }
 

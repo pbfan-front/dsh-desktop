@@ -61,6 +61,15 @@ describe('business workflow IPC', () => {
     expect(() => invoke('business-workflow:get', '../unsafe')).toThrow('runId is missing or unsafe')
   })
 
+  it('filters the inline card read to its conversation without changing the advanced list contract', async () => {
+    const { runtime, invoke } = setup()
+    const run = await runtime.start({ workflowId: definition.id, pluginId: 'demo.business', context: { sessionId: 's1' } })
+    expect(invoke('business-workflow:list', 's1')).toMatchObject({ runs: [{ id: run.id }] })
+    expect(invoke('business-workflow:list', 's2')).toEqual({ runs: [] })
+    expect(invoke('business-workflow:list')).toMatchObject({ runs: [{ id: run.id }] })
+    expect(() => invoke('business-workflow:list', {})).toThrow('sessionId is invalid')
+  })
+
   it('rejects all operations when the sender is not trusted', () => {
     const { invoke, assertTrustedEvent } = setup()
     assertTrustedEvent.mockImplementation(() => {
