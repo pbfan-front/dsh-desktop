@@ -171,6 +171,21 @@ export function prewarmShellEnvironment(): Promise<NodeJS.ProcessEnv> {
   return shellEnvironmentCapture
 }
 
+// The login-shell snapshot is started before bootstrap sets this Desktop-owned
+// connection path. Overlay only that late-bound value at Harness launch, so
+// shell PATH and user-provided provider variables retain their existing source.
+export function withDesktopHarnessEnvironment(
+  shellEnvironment: NodeJS.ProcessEnv,
+  currentEnvironment: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  const environment = { ...shellEnvironment }
+  delete environment.DSH_BUSINESS_CONNECTION_FILE
+  if (currentEnvironment.DSH_BUSINESS_CONNECTION_FILE) {
+    environment.DSH_BUSINESS_CONNECTION_FILE = currentEnvironment.DSH_BUSINESS_CONNECTION_FILE
+  }
+  return environment
+}
+
 /**
  * Replace captured values that lost characters in decoding with the ones this
  * process already holds.
@@ -538,7 +553,7 @@ export class HarnessRuntime {
           launchDirectory,
           this.options.dshHome,
           process.platform,
-          shellEnvironment,
+          withDesktopHarnessEnvironment(shellEnvironment, process.env),
           profile
         )
       )

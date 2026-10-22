@@ -54,6 +54,14 @@ describe('business plugin semantic rules', () => {
     expect(parseBusinessPluginSemanticRules({ scenarioSemanticRules: [rule] })).toEqual([rule])
   })
 
+  it('preserves an explicit clause opt-in and rejects unsupported matching modes', () => {
+    expect(parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{ ...rule, intentMatch: 'leading-clause' }] }))
+      .toEqual([{ ...rule, intentMatch: 'leading-clause' }])
+    expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{ ...rule, intentMatch: 'fuzzy' }] })).toThrow('intentMatch')
+    expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{ ...rule, intentEquals: '业务：正常', intentMatch: 'leading-clause' }] }))
+      .toThrow('shared business control contract')
+  })
+
   it('rejects unsafe paths and duplicate identifiers', () => {
     expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [rule, rule] })).toThrow('duplicated')
     expect(() => parseBusinessPluginSemanticRules({ scenarioSemanticRules: [{

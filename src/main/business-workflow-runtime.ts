@@ -36,9 +36,15 @@ export interface BusinessWorkflowGateContext extends BusinessWorkflowStepContext
 export type BusinessWorkflowGate = (context: BusinessWorkflowGateContext) => Promise<void> | void
 export type BusinessWorkflowGates = Record<string, BusinessWorkflowGate>
 
+export interface BusinessWorkflowCheckpointValidationResult {
+  contextPatch?: Record<string, unknown>
+  /** Retain this checkpoint while collecting ordered, server-verified evidence. */
+  continueWaiting?: boolean
+}
+
 export type BusinessWorkflowCheckpointValidator = (
-  context: BusinessWorkflowStepContext & { checkpointOutput: unknown }
-) => Promise<void> | void
+  context: BusinessWorkflowStepContext & { checkpointOutput: unknown; proposal?: true }
+) => Promise<BusinessWorkflowCheckpointValidationResult | void> | BusinessWorkflowCheckpointValidationResult | void
 
 export type BusinessWorkflowRetryValidator = (
   context: BusinessWorkflowStepContext & { error: BusinessWorkflowError; retryInput: unknown }
@@ -49,6 +55,7 @@ interface RegisteredWorkflow {
   handlers: BusinessWorkflowHandlers
   gates: BusinessWorkflowGates
   checkpointValidators: Record<string, BusinessWorkflowCheckpointValidator>
+  proposalCheckpoints: Set<string>
   retryValidators: Record<string, BusinessWorkflowRetryValidator>
   pluginId?: string
   compatibleRunVersions: Set<string>
@@ -58,6 +65,8 @@ export interface BusinessWorkflowRegistrationOptions {
   pluginId?: string
   compatibleRunVersions?: string[]
   checkpointValidators?: Record<string, BusinessWorkflowCheckpointValidator>
+  /** Explicit host opt-in; proposal validation must not advance a checkpoint or mutate external state. */
+  proposalCheckpoints?: string[]
   retryValidators?: Record<string, BusinessWorkflowRetryValidator>
 }
 
@@ -116,12 +125,18 @@ export class BusinessWorkflowRuntime {
         throw new Error(`Workflow retry validator has no matching deterministic step: ${definition.id}/${stepId}`)
       }
     }
+    for (const stepId of options.proposalCheckpoints ?? []) {
+      if (!definition.steps.some(step => step.id === stepId && step.type === 'checkpoint') || !options.checkpointValidators?.[stepId]) {
+        throw new Error(`Workflow proposal checkpoint needs a validator: ${definition.id}/${stepId}`)
+      }
+    }
     if (options.pluginId !== undefined && !safeId.test(options.pluginId)) throw new Error('Workflow registration pluginId is unsafe.')
     const compatibleRunVersions = new Set(options.compatibleRunVersions ?? [])
     compatibleRunVersions.delete(definition.version)
     this.workflows.set(definition.id, {
       definition: clone(definition), handlers: { ...handlers }, gates: { ...gates },
       checkpointValidators: { ...options.checkpointValidators },
+      proposalCheckpoints: new Set(options.proposalCheckpoints),
       retryValidators: { ...options.retryValidators },
       pluginId: options.pluginId, compatibleRunVersions
     })
@@ -176,34 +191,94 @@ export class BusinessWorkflowRuntime {
     }
   }
 
-  async resume(runId: string, checkpointOutput?: unknown): Promise<BusinessWorkflowRun> {
+  async proposeCheckpoint(runId: string, checkpointOutput: unknown): Promise<BusinessWorkflowRun> {
     const run = this.requireRun(runId)
     await this.ensureRunnableCompatibility(run)
-    if (run.status !== 'waiting_for_user' || !run.currentStepId) {
-      throw new Error(`Workflow is not waiting at a checkpoint: ${runId}`)
+    if (this.executing.has(runId)) throw new Error(`Workflow run is already executing: ${runId}`)
+    this.executing.add(runId)
+    try {
+      const workflow = this.requireWorkflow(run.workflowId)
+      const step = run.steps.find(candidate => candidate.id === run.currentStepId)
+      if (run.status !== 'waiting_for_user' || !step || step.type !== 'checkpoint' || step.status !== 'running'
+        || !workflow.proposalCheckpoints.has(step.id)) throw new Error('This workflow is not waiting for a proposal-enabled checkpoint.')
+      assertSerializable(checkpointOutput, 'checkpoint proposal')
+      if (checkpointOutput === undefined || JSON.stringify(checkpointOutput).length > 131072) throw new Error('Checkpoint proposal is missing or too large.')
+      const definition = workflow.definition.steps.find(candidate => candidate.id === step.id)
+      const validator = workflow.checkpointValidators[step.id]
+      if (!definition || !validator) throw new Error('Checkpoint proposal validator is missing.')
+      const result = await validator({ runId, workflowId: run.workflowId, pluginId: run.pluginId,
+        step: clone(definition), context: clone(run.context), checkpointOutput: clone(checkpointOutput), proposal: true })
+      if (result !== undefined) throw new Error('Proposal validation cannot advance or patch a workflow.')
+      const previous = run.checkpointProposal
+      const previousUpdatedAt = run.updatedAt
+      run.checkpointProposal = { id: randomUUID(), checkpointId: step.id, output: clone(checkpointOutput), proposedAt: this.timestamp() }
+      try { await this.touch(run) }
+      catch (error) {
+        if (previous) run.checkpointProposal = previous
+        else delete run.checkpointProposal
+        run.updatedAt = previousUpdatedAt
+        throw error
+      }
+      return this.present(run)
+    } finally { this.executing.delete(runId) }
+  }
+
+  async approveCheckpointProposal(runId: string, proposalId: string): Promise<BusinessWorkflowRun> {
+    const run = this.requireRun(runId)
+    if (!run.checkpointProposal || run.checkpointProposal.id !== proposalId) throw new Error('The displayed proposal changed; review the current version before confirming.')
+    return this.resumeCheckpoint(runId, clone(run.checkpointProposal.output), proposalId)
+  }
+
+  async resume(runId: string, checkpointOutput?: unknown): Promise<BusinessWorkflowRun> {
+    return this.resumeCheckpoint(runId, checkpointOutput)
+  }
+
+  private async resumeCheckpoint(runId: string, checkpointOutput?: unknown, proposalId?: string): Promise<BusinessWorkflowRun> {
+    const run = this.requireRun(runId)
+    await this.ensureRunnableCompatibility(run)
+    if (this.executing.has(runId)) throw new Error(`Workflow run is already executing: ${runId}`)
+    this.executing.add(runId)
+    try {
+      if (run.status !== 'waiting_for_user' || !run.currentStepId) {
+        throw new Error(`Workflow is not waiting at a checkpoint: ${runId}`)
+      }
+      assertSerializable(checkpointOutput, 'checkpoint output')
+      const step = run.steps.find((candidate) => candidate.id === run.currentStepId)
+      if (!step || step.type !== 'checkpoint' || step.status !== 'running') {
+        throw new Error(`Workflow checkpoint state is inconsistent: ${runId}`)
+      }
+      if (proposalId !== undefined && (run.checkpointProposal?.id !== proposalId || run.checkpointProposal.checkpointId !== step.id)) {
+        throw new Error('The displayed proposal changed; review the current version before confirming.')
+      }
+      const workflow = this.requireWorkflow(run.workflowId)
+      if (proposalId !== undefined && !workflow.proposalCheckpoints.has(step.id)) throw new Error('This checkpoint no longer accepts proposal confirmation.')
+      const validator = workflow.checkpointValidators[step.id]
+      if (validator) {
+        const definition = workflow.definition.steps.find(candidate => candidate.id === step.id)!
+        const previousStep = run.steps[run.steps.indexOf(step) - 1]
+        const result = await validator({
+          runId: run.id, workflowId: run.workflowId, pluginId: run.pluginId,
+          step: clone(definition), context: clone(run.context),
+          previousOutput: clone(previousStep?.output), checkpointOutput: clone(checkpointOutput)
+        })
+        assertSerializable(result, `workflow checkpoint validation ${step.id}`)
+        if (result?.contextPatch) Object.assign(run.context, clone(result.contextPatch))
+        if (result?.continueWaiting) {
+          await this.touch(run)
+          return this.present(run)
+        }
+      }
+      step.output = clone(checkpointOutput)
+      if (proposalId !== undefined) step.confirmedProposalId = proposalId
+      delete run.checkpointProposal
+      step.status = 'completed'
+      step.completedAt = this.timestamp()
+      run.status = 'running'
+      run.currentStepId = undefined
+      await this.touch(run)
+    } finally {
+      this.executing.delete(runId)
     }
-    assertSerializable(checkpointOutput, 'checkpoint output')
-    const step = run.steps.find((candidate) => candidate.id === run.currentStepId)
-    if (!step || step.type !== 'checkpoint' || step.status !== 'running') {
-      throw new Error(`Workflow checkpoint state is inconsistent: ${runId}`)
-    }
-    const workflow = this.requireWorkflow(run.workflowId)
-    const validator = workflow.checkpointValidators[step.id]
-    if (validator) {
-      const definition = workflow.definition.steps.find(candidate => candidate.id === step.id)!
-      const previousStep = run.steps[run.steps.indexOf(step) - 1]
-      await validator({
-        runId: run.id, workflowId: run.workflowId, pluginId: run.pluginId,
-        step: clone(definition), context: clone(run.context),
-        previousOutput: clone(previousStep?.output), checkpointOutput: clone(checkpointOutput)
-      })
-    }
-    step.output = clone(checkpointOutput)
-    step.status = 'completed'
-    step.completedAt = this.timestamp()
-    run.status = 'running'
-    run.currentStepId = undefined
-    await this.touch(run)
     return this.execute(runId)
   }
 
@@ -249,6 +324,7 @@ export class BusinessWorkflowRuntime {
       if (step.status === 'pending' || step.status === 'running') step.status = 'skipped'
     }
     run.status = 'cancelled'
+    delete run.checkpointProposal
     run.currentStepId = undefined
     await this.touch(run)
     return clone(run)

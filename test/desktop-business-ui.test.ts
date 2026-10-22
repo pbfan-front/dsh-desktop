@@ -26,7 +26,10 @@ describe('business sidebar plugin on Harness 0.2', () => {
     vm.runInNewContext(source, { window: hostWindow, document, CustomEvent: class { constructor(public name: string) {} } })
     expect(definition).toBeDefined()
     const plugin = definition!.factory((id) => {
-      if (id === 'react') return { createElement: (type: unknown, props: unknown, ...children: unknown[]) => ({ type, props, children }) }
+      if (id === 'react') return {
+        createElement: (type: unknown, props: unknown, ...children: unknown[]) => ({ type, props, children }),
+        useEffect: (setup: () => void) => setup()
+      }
       if (id === '@deepseek-ai/dsh-client-ui-primitives') return {}
       throw new Error(`Unexpected dependency ${id}`)
     })
@@ -58,6 +61,8 @@ describe('business sidebar plugin on Harness 0.2', () => {
     const action = seats.find(({ name }) => name === 'conversation.session.header.actions')?.component({ sessionId: 's1' }) as {
       props: { onClick: () => void }
     }
+    expect(document.documentElement.dataset.dshBusinessSessionId).toBe('s1')
+    expect(openTab).not.toHaveBeenCalled()
     action.props.onClick()
     expect(document.documentElement.dataset.dshBusinessSessionId).toBe('s1')
     expect(openTab).toHaveBeenCalledWith('business-preview')

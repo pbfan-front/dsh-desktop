@@ -42,6 +42,8 @@ export interface BusinessPluginSemanticRule {
   id: string
   routePath: string
   intentEquals: string
+  /** Opt-in only. A precise leading clause may precede the preserved request details. */
+  intentMatch?: 'exact' | 'leading-clause'
   apiUrl: string
   fieldAssertions: Array<{ path: Array<string | number>; equals: string | number | boolean | null }>
   sourceScenarioIds: string[]
@@ -175,6 +177,10 @@ export function parseBusinessPluginSemanticRules(manifest: Record<string, unknow
       throw new Error(`Semantic rule ${id} routePath or apiUrl is unsafe.`)
     }
     const intentEquals = safeText(rule.intentEquals, `Semantic rule ${id} intentEquals is missing.`, 1000)
+    const intentMatch = rule.intentMatch
+    if (intentMatch !== undefined && intentMatch !== 'exact' && intentMatch !== 'leading-clause') {
+      throw new Error(`Semantic rule ${id} intentMatch must be exact or leading-clause.`)
+    }
     if (!Array.isArray(rule.fieldAssertions) || rule.fieldAssertions.length > 16) {
       throw new Error(`Semantic rule ${id} fieldAssertions must contain at most 16 assertions.`)
     }
@@ -196,7 +202,7 @@ export function parseBusinessPluginSemanticRules(manifest: Record<string, unknow
     if (fieldAssertions.length === 0 && sourceScenarioIds.length === 0) {
       throw new Error(`Semantic rule ${id} has no assertions or source scenarios.`)
     }
-    const parsed = { id, routePath, intentEquals, apiUrl, fieldAssertions, sourceScenarioIds }
+    const parsed: BusinessPluginSemanticRule = { id, routePath, intentEquals, ...(intentMatch === undefined ? {} : { intentMatch }), apiUrl, fieldAssertions, sourceScenarioIds }
     if (!validSemanticExpectations([parsed], routePath, intentEquals)) {
       throw new Error(`Semantic rule ${id} does not satisfy the shared business control contract.`)
     }

@@ -409,6 +409,14 @@
         "to": "business-mock-store.mjs"
       },
       {
+        "from": "build/business-source-evidence.mjs",
+        "to": "business-source-evidence.mjs"
+      },
+      {
+        "from": "build/business-scenario-equivalence.mjs",
+        "to": "business-scenario-equivalence.mjs"
+      },
+      {
         "from": "build/business-control-contract.mjs",
         "to": "business-control-contract.mjs"
       },

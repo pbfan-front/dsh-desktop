@@ -4,6 +4,7 @@ import { registerBusinessWorkflowHandlers } from './business-workflow-ipc'
 import { createPersistentBusinessWorkflowRuntime } from './business-workflow-store'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import { BUSINESS_SCENARIO_WORKFLOW_ID, registerBusinessScenarioWorkflow } from './business-scenario-workflow'
+import { proposeBusinessScenarioPlan } from './business-scenario-plan'
 import { summarizeBusinessScenarioTiming } from './business-scenario-timing'
 import { parseBusinessPluginSemanticRules, parseBusinessPluginWorkflows } from './business-plugin-contract'
 import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
@@ -3496,6 +3497,7 @@ async function bootstrap(): Promise<void> {
           : {}
         if (typeof input.runId !== 'string') throw new Error('Workflow runId is required.')
         if (action === 'get') return { run: businessWorkflowRuntime.getRun(input.runId) ?? null }
+        if (action === 'propose-plan') return proposeBusinessScenarioPlan(businessWorkflowRuntime, input)
         if (action === 'resume') return businessWorkflowRuntime.resume(input.runId, input.checkpointOutput)
         if (action === 'retry') return businessWorkflowRuntime.retry(input.runId, input.retryInput)
         return businessWorkflowRuntime.cancel(input.runId)

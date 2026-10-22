@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticExpectations, validSemanticSourceRequest } from '../src/shared/business-control-contract'
+import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, resolveSemanticIntent, validSemanticExpectations, validSemanticSourceRequest } from '../src/shared/business-control-contract'
 
 const rule = {
   id: 'receipt-normal-status', routePath: '/repay/receiptList', intentEquals: '借据列表正常展示',
@@ -37,5 +37,32 @@ describe('business control contract shared by Main and Runtime', () => {
     expect(profileCreationRequestError({ ...creation, profile: { ...creation.profile, routePath: '/../private' } })).toBe('profile requires a non-empty label, page and safe absolute routePath')
     expect(profileCreationRequestError({ ...creation, scenarios: [] })).toBe('scenarios must contain 1-12 items')
     expect(profileCreationRequestError({ ...creation, query: '其他业务状态' })).toBe('Invalid semantic expectations for Profile creation')
+  })
+
+  it.each(['：', ':', '，', ',', '。', '；', ';', '\n', '\r\n'])('recognizes only an opted-in exact leading clause before %j', separator => {
+    const declared = { ...rule, intentMatch: 'leading-clause' as const }
+    const query = `  ${rule.intentEquals} ${separator} 保持默认分支，不执行交易。`
+    expect(resolveSemanticIntent([declared], rule.routePath, query)).toEqual({ status: 'matched',
+      canonicalIntent: rule.intentEquals, source: 'declared-leading-clause', ruleIds: [rule.id] })
+    expect(validSemanticSourceRequest({ ...request, query, semanticExpectations: [declared] })).toBe(true)
+    expect(profileCreationRequestError({ ...creation, query, semanticExpectations: [declared] })).toBeNull()
+    expect(resolveSemanticIntent([rule], rule.routePath, query).status).toBe('unmatched')
+  })
+
+  it.each(['不要借据列表正常展示：保持默认', '不是借据列表正常展示', '示例：借据列表正常展示',
+    '“借据列表正常展示”：保持默认', '借据列表展示正常：保持默认', '借据列表正常展示更多：保持默认',
+    ':借据列表正常展示', '借据列表正常展示/创建分支'])('does not guess intent from %j', query => {
+    expect(resolveSemanticIntent([{ ...rule, intentMatch: 'leading-clause' }], rule.routePath, query).status).toBe('unmatched')
+  })
+
+  it('rejects conflicting declared clauses and keeps route scope exact', () => {
+    const rules = [{ ...rule, intentMatch: 'leading-clause' as const },
+      { ...rule, id: 'overdue', intentEquals: '借据列表展示逾期借据' }]
+    const query = `${rule.intentEquals}；借据列表展示逾期借据`
+    expect(resolveSemanticIntent(rules, rule.routePath, query).status).toBe('ambiguous')
+    expect(validSemanticExpectations(rules, rule.routePath, query)).toBe(false)
+    expect(resolveSemanticIntent(rules, '/repay/receiptListOther', rule.intentEquals).status).toBe('unmatched')
+    expect(validSemanticExpectations([{ ...rule, intentMatch: 'fuzzy' }], rule.routePath, rule.intentEquals)).toBe(false)
+    expect(validSemanticExpectations([{ ...rule, intentEquals: '业务：正常', intentMatch: 'leading-clause' }], rule.routePath, '业务：正常')).toBe(false)
   })
 })

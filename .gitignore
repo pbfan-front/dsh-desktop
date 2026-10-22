@@ -1,6 +1,7 @@
 node_modules/
 build/business-package*/
 build/business-dev-user-data/
+build/plugins/
 build/reports/
 build/connection.json
 build/workflow-runs.json

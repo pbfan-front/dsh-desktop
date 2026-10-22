@@ -1,13 +1,56 @@
 [
   {
     "id": "receipt-normal",
+    "review": {
+      "status": "approved",
+      "evidenceRef": "docs/business-experience-review-batch-2026-10-16.md#manual-review-record",
+      "reviewedAt": "2026-10-16"
+    },
+    "coverage": { "target": "explicit-route", "behavior": "existing-reuse" },
     "intent": "借据列表正常展示",
     "routePath": "/repay/receiptList",
     "apiUrl": "/loanNbr/loanNbr.json",
+    "requestPath": "/mock/mesp-wpm/loanNbr/loanNbr.json",
+    "sourceScenarioId": "正常借据可以提前结清",
     "mockFields": [
-      { "path": ["data", "list", 0, "duestatus"], "equals": "0" }
+      { "path": ["data", "list", 0, "duestatus"], "equals": "0" },
+      { "path": ["data", "list", 0, "loan_acct_no"], "equals": "JQ20250528QJ0M00006007" }
     ],
-    "visibleText": ["借据列表"],
-    "absentText": ["系统繁忙", "逾期"]
+    "visibleText": ["借据列表", "JQ20250528QJ0M00006007", "正常"],
+    "absentText": ["系统繁忙"],
+    "domAssertion": {
+      "containerSelector": ".receipt-item-wrapper",
+      "fields": [
+        { "selector": ".top-receipt", "includes": "JQ20250528QJ0M00006007" },
+        { "selector": ".status span", "equals": "正常" }
+      ]
+    }
+  },
+  {
+    "id": "receipt-overdue",
+    "review": {
+      "status": "approved",
+      "evidenceRef": "docs/business-experience-review-batch-2026-10-16.md#manual-review-record",
+      "reviewedAt": "2026-10-16"
+    },
+    "coverage": { "target": "explicit-route", "behavior": "existing-reuse" },
+    "intent": "借据列表展示逾期借据",
+    "routePath": "/repay/receiptList",
+    "apiUrl": "/loanNbr/loanNbr.json",
+    "requestPath": "/mock/mesp-wpm/loanNbr/loanNbr.json",
+    "sourceScenarioId": "多个优惠券提示",
+    "mockFields": [
+      { "path": ["data", "list", 0, "duestatus"], "equals": "1" },
+      { "path": ["data", "list", 0, "loan_acct_no"], "equals": "JQ20250320QG0M00003006" }
+    ],
+    "visibleText": ["借据列表", "JQ20250320QG0M00003006", "逾期"],
+    "absentText": ["系统繁忙"],
+    "domAssertion": {
+      "containerSelector": ".receipt-item-wrapper",
+      "fields": [
+        { "selector": ".top-receipt", "includes": "JQ20250320QG0M00003006" },
+        { "selector": ".status span", "equals": "逾期" }
+      ]
+    }
   }
 ]

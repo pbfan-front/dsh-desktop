@@ -6,6 +6,8 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, relative, isAbsolute, extname } from 'node:path'
 import { createBusinessMockStore } from './business-mock-store.mjs'
+import { createBusinessSourceEvidence, sourceEvidenceTarget } from './business-source-evidence.mjs'
+import { groupEquivalentScenarioMatches } from './business-scenario-equivalence.mjs'
 import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticSourceRequest } from './business-control-contract.mjs'
 
 // This process serves an exported package only. It does not launch npm or a dev server.
@@ -46,6 +48,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   let codeIndex = {}
   let codeIntellDerived = { fileApiEntries: [], apiCallerEntries: [] }
   let codeIntellLifecycleStamp = ''
+  let codeIntellGraphHash
   let codeIntellStatus = { state: 'unavailable', fresh: false, compatible: false, buildId: null, generatedAt: null,
     coverage: null, lastCheckedAt: null, lastLoadedAt: null, error: 'CodeIntell has not been loaded.' }
   const sha256 = async file => createHash('sha256').update(await readFile(file)).digest('hex')
@@ -73,6 +76,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!Array.isArray(routes) || !index || typeof index !== 'object' || Array.isArray(index)) throw new Error('CodeIntell artifacts have an incompatible shape')
       codeRoutes = routes
       codeIndex = index
+      codeIntellGraphHash = lifecycle.artifacts?.['graph.json']
       codeIntellDerived = {
         fileApiEntries: Object.entries(index.fileToApis || {}),
         apiCallerEntries: Object.entries(index.apiCallers || {}).flatMap(([apiUrl, callers]) => (callers || []).flatMap(caller => {
@@ -199,6 +203,22 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     if (parts.length !== 2 || parts.some(part => !/^[a-zA-Z0-9_.-]+$/.test(part))) throw new Error(`Unsupported API URL: ${apiUrl}`)
     return join('src/baseTypes/api', parts[0], parts[1].replace(/\.json$/, ''), 'mock.json')
   }
+  const canonicalApiUrl = value => {
+    if (typeof value !== 'string') return ''
+    const parts = value.split('?')[0].split('/').filter(Boolean)
+    if (parts[0] === 'mock') parts.shift()
+    if (parts[0] === 'mesp-wpm') parts.shift()
+    return parts.length === 2 ? `/${parts.join('/')}` : ''
+  }
+  const businessRoutePath = value => {
+    if (typeof value !== 'string') return ''
+    const hashAt = value.indexOf('#')
+    const route = hashAt >= 0 ? value.slice(hashAt + 1) : value
+    if (route.startsWith('http://') || route.startsWith('https://')) {
+      try { return new URL(route).pathname } catch { return '' }
+    }
+    return route.split('?')[0]
+  }
   const atomicJson = async (file, value) => {
     await mkdir(join(file, '..'), { recursive: true })
     const temporary = `${file}.${process.pid}.tmp`
@@ -208,9 +228,10 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const readAnalysisPreferences = async () => {
     try {
       const value = JSON.parse(await readFile(analysisPreferenceFile, 'utf8'))
-      return { schemaVersion: 1, mode: value.mode === 'assisted' ? 'assisted' : 'strict', sessionReuse: value.sessionReuse !== false }
+      return { schemaVersion: 1, mode: value.mode === 'assisted' ? 'assisted' : 'strict', sessionReuse: value.sessionReuse !== false,
+        exactScenarioEquivalence: value.exactScenarioEquivalence !== false }
     } catch (error) {
-      if (error.code === 'ENOENT') return { schemaVersion: 1, mode: 'strict', sessionReuse: true }
+      if (error.code === 'ENOENT') return { schemaVersion: 1, mode: 'strict', sessionReuse: true, exactScenarioEquivalence: true }
       throw error
     }
   }
@@ -256,6 +277,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     ? config.scenarios
     : Object.entries(config?.scenarios || {}).map(([id, value]) => ({ ...value, id }))
   const mockStore = await createBusinessMockStore({ source, userRoot, manifest, atomicJson, apiMockRelative, scenarioArray })
+  const sourceEvidence = await createBusinessSourceEvidence({ source })
   const { read: readMockConfig, readFresh: readFreshMockConfig, validSemanticExpectations,
     checkScenarioSemanticValues, checkFreshSemanticSources } = mockStore
   const sourceTextFileCache = new Map()
@@ -473,6 +495,22 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     return output
   }
   const payloadLeafFields = value => leafFieldValues(plainObject(value?.data) ? value.data : value)
+  const scenarioValuePreview = (data, limit) => {
+    const scalarFields = [...payloadLeafFields(data)].filter(([, value]) =>
+      value === null || ['string', 'number', 'boolean'].includes(typeof value))
+    const fields = scalarFields.slice(0, limit).map(([path, value]) => ({
+      path,
+      ...(typeof value === 'string' && value.length > 64 ? { valueOmitted: 'string-too-long' } : { value })
+    }))
+    return {
+      source: 'current-mock-config-scenario-data',
+      scope: 'first-array-item-and-bounded-depth',
+      indexedScalarFieldCount: scalarFields.length,
+      returnedFieldCount: fields.length,
+      truncated: scalarFields.length > fields.length,
+      fields
+    }
+  }
   const changedPayloadFields = (baseData, scenarioData, preparedBase) => {
     const base = preparedBase || payloadLeafFields(baseData)
     const scenario = payloadLeafFields(scenarioData)
@@ -526,7 +564,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     return safeRoute(routePath) ? routePath : undefined
   }
   const targetResolutionError = (code, message, candidates = []) => {
-    const error = new Error(`${code}: ${message}${candidates.length ? ` Candidates: ${JSON.stringify(candidates.slice(0, 8))}` : ''}`)
+    const selectionNote = code === BUSINESS_CONTROL_ERROR.targetRouteAmbiguous
+      ? ' Candidate order is arbitrary; none is recommended or preselected. Require an explicit user choice.' : ''
+    const error = new Error(`${code}: ${message}${selectionNote}${candidates.length ? ` Candidates: ${JSON.stringify(candidates.slice(0, 8))}` : ''}`)
     error.code = code
     error.candidates = candidates.slice(0, 8).map(routeCandidate)
     return error
@@ -615,6 +655,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       sessionId,
       sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
       analysisMode: preferences.mode,
+      exactScenarioEquivalence: preferences.exactScenarioEquivalence,
       analysisMutationRevision,
       routePath,
       normalizedQuery: normalizedHint(query),
@@ -622,10 +663,22 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     })
     const reusable = reuseEnabled ? sessionAnalysisReuse.get(reuseKey) : undefined
     const preferencesAndReuseLookupMs = roundDuration(performance.now() - preferencesStartedAt)
-    if (reusable && reusable.expiresAt > Date.now()) {
+    const reuseValidationStartedAt = performance.now()
+    const mockInputsCurrent = reusable && Array.isArray(reusable.mockInputs) && (await Promise.all(reusable.mockInputs.map(async input => {
+      try {
+        const metadata = await stat(input.file)
+        return input.fingerprint === `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`
+      } catch (error) {
+        if (error.code === 'ENOENT') return input.fingerprint === null
+        throw error
+      }
+    }))).every(Boolean)
+    const reuseValidationMs = roundDuration(performance.now() - reuseValidationStartedAt)
+    if (reusable && reusable.expiresAt > Date.now() && mockInputsCurrent) {
       const evidenceId = randomUUID()
       const expiresAtMs = Date.now() + 30 * 60_000
       analysisEvidence.set(evidenceId, {
+        sessionId, componentFile: reusable.evidence.componentFile, lifecycleStamp: codeIntellLifecycleStamp,
         routePath: reusable.evidence.routePath,
         apis: new Map(reusable.evidence.apis),
         expiresAt: expiresAtMs
@@ -645,6 +698,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           reused: true,
           codeIntellRefreshMs,
           preferencesAndReuseLookupMs,
+          reuseValidationMs,
           totalMs: roundDuration(performance.now() - analysisStartedAt)
         }
       }
@@ -814,11 +868,16 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     const preparationStartedAt = Date.now()
     const cacheStatsBeforePreparation = { ...mockStore.stats }
     const preparedCandidates = []
+    const mockInputProbes = new Map()
     for (let index = 0; index < rankedCandidates.length; index += preparationConcurrency) {
       const preparedBatch = await Promise.all(rankedCandidates.slice(index, index + preparationConcurrency).map(async candidate => {
         let relativePath
         try { relativePath = apiMockRelative(candidate.apiUrl) } catch { return undefined }
         const existing = await readMockConfig(relativePath)
+        for (const probe of existing?.probes || [
+          { file: join(userRoot, relativePath), fingerprint: null },
+          { file: join(source, relativePath), fingerprint: null }
+        ]) mockInputProbes.set(probe.file, probe)
         let generated
         if (!existing) {
           try { generated = await generatedMockConfig(candidate.apiUrl, relativePath) } catch { return undefined }
@@ -949,7 +1008,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       }
       return score ? { score, reasons: [...new Set(reasons)] } : undefined
     }
-    const existingScenarioMatches = apis.flatMap(api => api.scenarios.flatMap(scenario => {
+    const rankedScenarioMatches = apis.flatMap(api => api.scenarios.flatMap(scenario => {
       const match = scenarioIntentMatch(scenario)
       if (!match) return []
       const consumedFieldCount = scenario.fieldImpact?.consumedFields?.length || 0
@@ -962,7 +1021,23 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         impactCoverage,
         consumedFieldCount,
         reasons: [...match.reasons, ...(impactScore ? ['field-impact-consumed'] : [])] }]
-    })).sort((left, right) => right.score - left.score).slice(0, 12)
+    })).sort((left, right) => right.score - left.score)
+    const existingScenarioMatches = rankedScenarioMatches.slice(0, 12)
+    const rawScenariosByApi = new Map(shortlistedCandidates.map(item => {
+      const scenarios = new Map()
+      // The field-analysis window is bounded. Do not elevate confidence by
+      // grouping a truncated API whose unexamined scenarios may be alternatives.
+      if (item.scenarios.length > 50) return [item.candidate.apiUrl, scenarios]
+      for (const scenario of item.scenarios) {
+        // Duplicate IDs cannot establish an unambiguous runtime selection.
+        scenarios.set(scenario.id, scenarios.has(scenario.id) ? undefined : scenario)
+      }
+      return [item.candidate.apiUrl, scenarios]
+    }))
+    const equivalence = groupEquivalentScenarioMatches(rankedScenarioMatches,
+      match => rawScenariosByApi.get(match.apiUrl)?.get(match.scenarioId),
+      { enabled: preferences.exactScenarioEquivalence })
+    const distinctScenarioMatches = equivalence.representatives.slice(0, 12)
     const matchedApiUrls = [...new Set(existingScenarioMatches.map(item => item.apiUrl))]
     const confidentExistingMatch = (existingScenarioMatches[0]?.matchScore || 0) >= 120
     const focusApiUrls = explicitApis.length
@@ -974,6 +1049,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       focusApiUrls,
       alternativeApiUrls: apis.map(api => api.apiUrl).filter(apiUrl => !focusApiUrls.includes(apiUrl)),
       existingScenarioMatches,
+      scenarioEquivalence: { ...equivalence.summary, distinctCandidates: distinctScenarioMatches },
       evidenceCandidateCount: apis.length,
       scenarioRanking: {
         strategy: 'intent-source-and-field-impact',
@@ -1004,7 +1080,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         : 'Start with focusApiUrls. Search source only when the bounded evidence packet cannot represent the requested business state.'
     }
     const strongestMatch = existingScenarioMatches[0]
-    const nextMatch = existingScenarioMatches[1]
+    // Group before any display truncation: a close, different state after many
+    // exact clones must still block a unique-match claim.
+    const nextMatch = equivalence.representatives[1]
     const uniqueConfidentMatch = confidentExistingMatch && strongestMatch
       && strongestMatch.apiUrl === focusApiUrls[0]
       && (!nextMatch || strongestMatch.score - nextMatch.score >= 40)
@@ -1081,6 +1159,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           ? 'Review focused evidence and alternatives. Request full workflow detail only when the bounded evidence remains ambiguous.'
           : 'Do not create a scenario yet. Refine the target page/API or repair the reported evidence gap.'
     }
+    if (analysisPlan.qualityGate.level === 'ready' && strongestMatch) {
+      const sourceScenario = shortlistedCandidates.find(item => item.candidate.apiUrl === strongestMatch.apiUrl)
+        ?.scenarios.find(item => item.id === strongestMatch.scenarioId)
+      if (sourceScenario) analysisPlan.leadingScenarioValuePreview = {
+        apiUrl: strongestMatch.apiUrl,
+        scenarioId: strongestMatch.scenarioId,
+        valuePreview: scenarioValuePreview(sourceScenario.data, 96)
+      }
+    }
     const compareSemanticCandidate = match => {
       const applicable = semanticExpectations.filter(rule => rule.apiUrl === match.apiUrl)
       if (!applicable.length) return { status: 'not-declared', reuseAdvice: 'no-semantic-rule-for-api', rules: [] }
@@ -1135,14 +1222,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           'existing-scenario-match-ambiguous': 'Multiple existing Scenarios are close in rank; inspect their Mock state before choosing one.',
           'matched-scenario-field-impact-unproven': 'The leading Scenario has no proven consumption of its changed fields on this page.'
         }[gap] || 'Review the reported evidence gap before confirming a plan.' })),
-        candidates: existingScenarioMatches.slice(0, 3).map(match => {
+        candidates: distinctScenarioMatches.slice(0, 3).map((match, index) => {
           const scenario = apis.find(api => api.apiUrl === match.apiUrl)?.scenarios.find(item => item.id === match.scenarioId)
+          const sourceScenario = shortlistedCandidates.find(item => item.candidate.apiUrl === match.apiUrl)
+            ?.scenarios.find(item => item.id === match.scenarioId)
           const impact = scenario?.fieldImpact
           return { apiUrl: match.apiUrl, scenarioId: match.scenarioId, label: match.label,
             intentMatchScore: match.matchScore, rankingScore: match.score,
             rankingBreakdown: { apiEvidenceScore: match.score - match.matchScore - match.impactScore,
               intentMatchScore: match.matchScore, fieldImpactScore: match.impactScore },
             matchReasons: match.reasons.filter(reason => reason !== 'field-impact-consumed'),
+            ...(sourceScenario ? { valuePreview: scenarioValuePreview(sourceScenario.data, index === 0 ? 96 : 24) } : {}),
             ...(semanticExpectations.length ? { semanticComparison: compareSemanticCandidate(match) } : {}),
             fieldImpact: { level: impact?.level || 'unproven', coverage: impact?.coverage || 0,
               changedFieldCount: scenario?.changedFields?.length || 0,
@@ -1154,7 +1244,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
                 evidence: (item.evidence || []).slice(0, 1) })) } }
         }),
         checksBeforeConfirmation: [
-          'Compare the intended business state with the actual Mock values in the selected Scenario; names and scores alone are insufficient.',
+          'Compare the intended business state with valuePreview from the current Mock config; names and scores alone are insufficient. The preview is bounded to the first array item and may omit fields.',
           'Check changed fields that are consumed by this page and explain any relevant unproven fields.',
           'Keep Profile creation behind confirm-plan and verify the final iframe text and real Scenario requests after applying.'
         ]
@@ -1189,13 +1279,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       analysisReuse: { enabled: reuseEnabled, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
     }
     const resultPreparedAt = performance.now()
-    const evidenceRecord = { routePath: route.path,
+    const evidenceRecord = { routePath: route.path, sessionId, componentFile, lifecycleStamp: codeIntellLifecycleStamp,
       apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
       expiresAt: expiresAtMs }
     analysisEvidence.set(evidenceId, evidenceRecord)
     const evidenceStoredAt = performance.now()
     if (reuseEnabled) {
-      sessionAnalysisReuse.set(reuseKey, { result, evidence: evidenceRecord, expiresAt: Date.now() + 5 * 60_000, analyzedAt })
+      const mockInputs = [...mockInputProbes.values()]
+      sessionAnalysisReuse.set(reuseKey, { result, evidence: evidenceRecord, mockInputs, expiresAt: Date.now() + 5 * 60_000, analyzedAt })
       while (sessionAnalysisReuse.size > 50) sessionAnalysisReuse.delete(sessionAnalysisReuse.keys().next().value)
     }
     const reuseStoredAt = performance.now()
@@ -1235,6 +1326,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       reused: false,
       codeIntellRefreshMs,
       preferencesAndReuseLookupMs,
+      reuseValidationMs,
       evidenceDiscoveryMs,
       sourceReadMs,
       accelerationHintsMs,
@@ -1284,28 +1376,42 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     target.hash = route
     return target.href
   }
-  const initialState = () => ({ revision: 0, profileId: '', url: businessAppUrl(manifest.entryRoute), verified: false })
   const safeSessionId = value => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,200}$/.test(value) ? value : defaultSessionId
+  const previewUrl = (route, sessionId, state) => {
+    const target = new URL(businessAppUrl(route))
+    if (state.profileId) target.searchParams.set('__mockProfile', state.profileId)
+    else target.searchParams.delete('__mockProfile')
+    target.searchParams.set('__dshSession', sessionId)
+    target.searchParams.set('__dshRevision', String(state.revision))
+    target.searchParams.set('__dshRevisionId', state.revisionId)
+    return target.href
+  }
+  const initialState = sessionId => {
+    const state = { revision: 0, profileId: '', revisionId: randomUUID(),
+      revisionStartedAt: new Date().toISOString(), verified: false }
+    return { ...state, url: previewUrl(manifest.entryRoute, sessionId, state) }
+  }
   const cookieValue = (req, name) => String(req.headers.cookie || '').split(';').map(item => item.trim()).find(item => item.startsWith(`${name}=`))?.slice(name.length + 1)
   const requestSessionId = (req, url) => safeSessionId(req.headers['x-dsh-session'] || url.searchParams.get('__dshSession') || decodeURIComponent(cookieValue(req, 'dsh_business_session') || ''))
   const stateFor = sessionId => {
     if (!sessionStates.has(sessionId)) {
       const restored = persistedSessionStates[sessionId]
       if (plainObject(restored) && typeof restored.route === 'string' && restored.route.startsWith('/') && !restored.route.startsWith('//')) {
-        const target = new URL(businessAppUrl(restored.route.slice(0, 500)))
         const restoredProfileId = typeof restored.profileId === 'string' && availableProfileIdsAtStartup.has(restored.profileId)
           ? restored.profileId
           : ''
-        if (restoredProfileId) target.searchParams.set('__mockProfile', restoredProfileId)
-        target.searchParams.set('__dshSession', sessionId)
-        sessionStates.set(sessionId, { revision: Number.isInteger(restored.revision) ? restored.revision : 0,
-          profileId: restoredProfileId, url: target.href, verified: false })
-      } else sessionStates.set(sessionId, initialState())
+        const state = { revision: Number.isInteger(restored.revision) ? restored.revision : 0,
+          profileId: restoredProfileId, revisionId: randomUUID(),
+          revisionStartedAt: new Date().toISOString(), verified: false }
+        sessionStates.set(sessionId, { ...state, url: previewUrl(restored.route.slice(0, 500), sessionId, state) })
+      } else sessionStates.set(sessionId, initialState(sessionId))
     }
     return sessionStates.get(sessionId)
   }
   const persistSessionStates = async () => {
-    const sessions = {}
+    // A restored session is loaded lazily. Saving another session must not
+    // discard the route/Profile of sessions not opened since this restart.
+    const sessions = { ...persistedSessionStates }
     for (const [sessionId, value] of sessionStates) {
       let route = manifest.entryRoute
       try { route = new URL(value.url).hash.replace(/^#/, '') || manifest.entryRoute } catch {}
@@ -1330,13 +1436,31 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       return []
     }
   }
+  const currentRequests = async (sessionId, state) => {
+    const revisionStartedAt = Date.parse(state.revisionStartedAt || '')
+    const now = Date.now()
+    const successful = item => item.sessionId === sessionId && item.profileId === state.profileId
+      && Number.isInteger(item.status) && item.status >= 200 && item.status < 300
+    const internal = evidence.filter(item => successful(item) && item.revision === state.revision)
+    const external = (await externalEvidence()).filter(item => {
+      if (!successful(item) || item.revision !== state.revision || item.revisionId !== state.revisionId) return false
+      const timestamp = Date.parse(item.timestamp || '')
+      return Number.isFinite(timestamp) && Number.isFinite(revisionStartedAt)
+        && timestamp >= revisionStartedAt && timestamp <= now
+    })
+    return [...internal, ...external]
+  }
+  const requestHitsBinding = (requests, apiUrl, scenarioId) => {
+    const expectedApi = canonicalApiUrl(apiUrl)
+    return Boolean(expectedApi && scenarioId) && requests.some(item =>
+      canonicalApiUrl(item.path) === expectedApi && item.scenarioId === scenarioId)
+  }
   const scenarioResult = async (sessionId, state, pageObservation) => {
     const profile = (await profileSummaries()).find(item => item.id === state.profileId)
-    const requests = [...evidence, ...(await externalEvidence())].filter(item => item.sessionId === sessionId
-      && item.profileId === state.profileId && (item.revision === undefined || item.revision === state.revision))
-    const matchedScenarios = new Set(requests.map(item => item.scenarioId).filter(Boolean))
+    const requests = await currentRequests(sessionId, state)
     const apiBindings = (profile?.apis || []).map(api => ({
-      apiUrl: api.apiUrl, scenarioId: api.scenarioId, hit: matchedScenarios.has(api.scenarioId),
+      apiUrl: api.apiUrl, scenarioId: api.scenarioId,
+      hit: requestHitsBinding(requests, api.apiUrl, api.scenarioId),
       fields: api.driverFields || [], compatibility: api.compatibility, conflictingFields: api.conflictingFields || []
     }))
     const requestHit = apiBindings.length > 0 && apiBindings.every(api => api.hit)
@@ -1401,6 +1525,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const payload = body ? JSON.parse(body) : {}
           const action = {
             '/__desktop/workflow/start-scenario': 'start-scenario',
+            '/__desktop/workflow/propose-plan': 'propose-plan',
             '/__desktop/workflow/resume': 'resume',
             '/__desktop/workflow/retry': 'retry',
             '/__desktop/workflow/cancel': 'cancel',
@@ -1408,7 +1533,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             '/__desktop/workflow/get': 'get'
           }[url.pathname]
           if (!action) return respond(res, 404, { error: 'Unknown workflow command' })
-          const workflowPayload = action === 'start-scenario' && plainObject(payload)
+          const workflowPayload = ['start-scenario', 'propose-plan'].includes(action) && plainObject(payload)
             ? { ...payload, sessionId }
             : payload
           try {
@@ -1419,6 +1544,31 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         }
         if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state, userData: userDataStatus, codeIntell: await refreshCodeIntell(), analysis: await readAnalysisPreferences(), workflow: await readWorkflowPreferences() })
         if (url.pathname === '/__desktop/code-intell/status') return respond(res, 200, await refreshCodeIntell())
+        if (url.pathname === '/__desktop/source/inspect-evidence' && req.method === 'POST') {
+          const chunks = []; let length = 0
+          for await (const chunk of req) { length += chunk.length; if (length > 4096) return respond(res, 413, { error: 'Request too large' }); chunks.push(chunk) }
+          let input
+          try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return respond(res, 422, { code: 'E_SOURCE_REVIEW_INVALID', error: 'Request must be valid JSON.' }) }
+          const record = typeof input?.evidenceId === 'string' ? analysisEvidence.get(input.evidenceId) : undefined
+          const status = await refreshCodeIntell()
+          try {
+            const target = sourceEvidenceTarget({ record, sessionId, lifecycleStamp: codeIntellLifecycleStamp,
+              state: status.state, graphHash: codeIntellGraphHash })
+            return respond(res, 200, await sourceEvidence.inspect({ ...target, identifiers: input.identifiers }))
+          } catch (error) { return respond(res, error.status || 500, { code: error.code || 'E_SOURCE_REVIEW_FAILED',
+            error: error.code?.startsWith('E_SOURCE_') ? error.message : 'Source evidence lookup failed; retain focused grep/read fallback.' }) }
+        }
+        if (url.pathname === '/__desktop/mock/inspect-scenario' && req.method === 'POST') {
+          const chunks = []
+          let size = 0
+          for await (const chunk of req) { size += chunk.length; if (size > 32768) return respond(res, 413, { error: 'Request too large' }); chunks.push(chunk) }
+          let input
+          try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return respond(res, 422, { code: 'E_MOCK_INSPECT_INVALID', error: 'Request must be valid JSON.' }) }
+          try { return respond(res, 200, await mockStore.inspectScenario(input)) }
+          catch (error) { return respond(res, error.status || 500, { code: error.code || 'E_MOCK_INSPECT_FAILED',
+            error: error.code?.startsWith('E_MOCK_') ? error.message : 'Mock inspection failed.',
+            ...(error.code === 'E_MOCK_INSPECT_INVALID' && error.recovery ? { recovery: error.recovery } : {}) }) }
+        }
         if (url.pathname === '/__desktop/workflow-mode' && req.method === 'GET') {
           return respond(res, 200, { ...(await readWorkflowPreferences()), defaultMode: 'workflow', auditFile: workflowAuditFile })
         }
@@ -1442,9 +1592,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const input = JSON.parse(body)
           if (!['strict', 'assisted'].includes(input.mode)) return respond(res, 422, { error: 'mode must be strict or assisted' })
           if (input.sessionReuse !== undefined && typeof input.sessionReuse !== 'boolean') return respond(res, 422, { error: 'sessionReuse must be boolean when provided' })
+          if (input.exactScenarioEquivalence !== undefined && typeof input.exactScenarioEquivalence !== 'boolean') return respond(res, 422, { error: 'exactScenarioEquivalence must be boolean when provided' })
           const current = await readAnalysisPreferences()
           await atomicJson(analysisPreferenceFile, { schemaVersion: 1, mode: input.mode,
-            sessionReuse: input.sessionReuse ?? current.sessionReuse, updatedAt: new Date().toISOString() })
+            sessionReuse: input.sessionReuse ?? current.sessionReuse,
+            exactScenarioEquivalence: input.exactScenarioEquivalence ?? current.exactScenarioEquivalence, updatedAt: new Date().toISOString() })
           invalidateSessionAnalysisReuse()
           return respond(res, 200, { ...(await readAnalysisPreferences()), cacheEntries: Object.keys((await readAnalysisCache()).entries).length })
         }
@@ -1558,17 +1710,21 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         if (url.pathname === '/__desktop/page-observation-ui' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 65536) return respond(res, 413, { error: 'Observation too large' }) }
           const value = JSON.parse(body)
-          pageObservation = { revision: state.revision, profileId: state.profileId, route: String(value.route || '').slice(0, 500),
+          const previousObservation = pageObservation
+          pageObservation = { revision: state.revision, revisionId: state.revisionId, profileId: state.profileId, route: String(value.route || '').slice(0, 500),
             title: String(value.title || '').slice(0, 200), text: String(value.text || '').slice(0, 50000), observedAt: new Date().toISOString() }
           pageObservations.set(sessionId, pageObservation)
+          if (!previousObservation || ['revision', 'profileId', 'route', 'title', 'text'].some(key =>
+            previousObservation[key] !== pageObservation[key])) {
+            state = { ...state, verified: false }
+            sessionStates.set(sessionId, state)
+            verificationResults.delete(sessionId)
+          }
           const observedBusinessRoute = pageObservation.route.includes('#')
             ? pageObservation.route.slice(pageObservation.route.indexOf('#') + 1)
             : pageObservation.route
           if (observedBusinessRoute.startsWith('/') && !observedBusinessRoute.startsWith('//')) {
-            const target = new URL(businessAppUrl(observedBusinessRoute))
-            if (state.profileId) target.searchParams.set('__mockProfile', state.profileId)
-            target.searchParams.set('__dshSession', sessionId)
-            state = { ...state, url: target.href }
+            state = { ...state, url: previewUrl(observedBusinessRoute, sessionId, state) }
             sessionStates.set(sessionId, state)
             await persistSessionStates()
           }
@@ -1577,25 +1733,63 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
         if (url.pathname === '/__desktop/verify' && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 16384) return respond(res, 413, { error: 'Request too large' }) }
           const input = JSON.parse(body)
+          if (input.partial !== undefined && typeof input.partial !== 'boolean') return respond(res, 422, { error: 'partial must be a boolean' })
+          if (input.expectedProfileId !== undefined && !safeId(input.expectedProfileId)) return respond(res, 422, { error: 'expectedProfileId is invalid' })
           const textList = value => Array.isArray(value) && value.length <= 20 && value.every(item => typeof item === 'string' && item.length <= 200) ? value : null
           const containsText = textList(input.containsText); const absentText = textList(input.absentText)
           if (!containsText || !absentText) return respond(res, 422, { error: 'containsText and absentText must be string arrays with at most 20 items' })
           const profile = (await catalog()).find(item => item.id === state.profileId)
-          const expectedScenarios = Object.values(profile?.apis || {}).flatMap(value => typeof value === 'string' ? [value] : value.sequence || [value.scenario]).filter(Boolean)
-          const matchedScenarios = new Set([...evidence, ...(await externalEvidence())]
-            .filter(item => item.sessionId === sessionId && item.profileId === state.profileId).map(item => item.scenarioId))
+          let expectedScenarios = Object.entries(profile?.apis || {}).flatMap(([apiUrl, selection]) =>
+            (typeof selection === 'string' ? [selection] : selection.sequence || [selection.scenario])
+              .filter(Boolean).map(scenarioId => ({ apiUrl, scenarioId })))
+          if (input.apiUrls !== undefined) {
+            const validApis = input.partial === true && Array.isArray(input.apiUrls) && input.apiUrls.length > 0
+              && input.apiUrls.length <= 12 && input.apiUrls.every(api => typeof api === 'string' && api.length <= 500
+                && canonicalApiUrl(api) && expectedScenarios.some(binding => canonicalApiUrl(binding.apiUrl) === canonicalApiUrl(api)))
+            if (!validApis) return respond(res, 422, { error: 'Only a partial page check may select a nonempty subset of the active Profile APIs' })
+            expectedScenarios = expectedScenarios.filter(binding => input.apiUrls.some(api => canonicalApiUrl(api) === canonicalApiUrl(binding.apiUrl)))
+          }
+          const requests = await currentRequests(sessionId, state)
+          const expectedRoute = businessRoutePath(input.route)
           const checks = {
-            currentProfile: Boolean(state.profileId && profile), observationCurrent: pageObservation?.revision === state.revision && pageObservation?.profileId === state.profileId,
-            route: !input.route || pageObservation?.route.includes(input.route),
+            currentProfile: Boolean(state.profileId && profile && (input.expectedProfileId === undefined || input.expectedProfileId === state.profileId)),
+            observationCurrent: pageObservation?.revision === state.revision && pageObservation?.revisionId === state.revisionId && pageObservation?.profileId === state.profileId,
+            route: Boolean(expectedRoute.startsWith('/') && !expectedRoute.startsWith('//')
+              && businessRoutePath(pageObservation?.route) === expectedRoute),
             containsText: containsText.map(text => ({ text, passed: Boolean(pageObservation?.text.includes(text)) })),
             absentText: absentText.map(text => ({ text, passed: !pageObservation?.text.includes(text) })),
-            scenarios: expectedScenarios.map(scenarioId => ({ scenarioId, passed: matchedScenarios.has(scenarioId) }))
+            scenarios: expectedScenarios.map(({ apiUrl, scenarioId }) => ({ apiUrl, scenarioId,
+              passed: requestHitsBinding(requests, apiUrl, scenarioId) }))
           }
-          const verified = checks.currentProfile && checks.observationCurrent && checks.route && checks.containsText.every(item => item.passed) && checks.absentText.every(item => item.passed) && checks.scenarios.every(item => item.passed)
-          state = { ...state, verified }
+          const verified = checks.currentProfile && checks.observationCurrent && checks.route
+            && checks.containsText.every(item => item.passed) && checks.absentText.every(item => item.passed)
+            && checks.scenarios.length > 0 && checks.scenarios.every(item => item.passed)
+          const checkedAt = new Date().toISOString()
+          const recentRequests = [...requests].reverse()
+          const requestEvidence = expectedScenarios.slice(0, 24).map(({ apiUrl, scenarioId }) => {
+            const hit = recentRequests.find(item => canonicalApiUrl(item.path) === canonicalApiUrl(apiUrl) && item.scenarioId === scenarioId)
+            return { apiUrl, scenarioId, request: hit ? { timestamp: hit.timestamp, path: hit.path, status: hit.status,
+              sessionId: hit.sessionId, profileId: hit.profileId, revision: hit.revision,
+              // Internal requests are recorded by this Runtime instance; external ones were filtered above.
+              revisionId: hit.revisionId || state.revisionId } : null }
+          })
+          state = { ...state, verified: verified && input.partial !== true }
           sessionStates.set(sessionId, state)
-          verificationResults.set(sessionId, { verified, checkedAt: new Date().toISOString(), expected: input, checks })
-          return respond(res, verified ? 200 : 422, { verified, checks, pageObservation: pageObservation && { ...pageObservation, text: pageObservation.text.slice(0, 2000) } })
+          verificationResults.set(sessionId, { verified: state.verified, ...(input.partial === true ? { stepVerified: verified } : {}), checkedAt, expected: input, checks })
+          const failures = []
+          if (!checks.currentProfile) failures.push('the expected Profile is not active')
+          if (!checks.observationCurrent) failures.push('the page observation is missing or stale')
+          if (!checks.route) failures.push(`route mismatch: expected ${expectedRoute.slice(0, 500)}, observed ${businessRoutePath(pageObservation?.route).slice(0, 500) || '(none)'}`)
+          const missingText = checks.containsText.filter(item => !item.passed)
+          const forbiddenText = checks.absentText.filter(item => !item.passed)
+          if (missingText.length) failures.push(`missing required text (${missingText.length}): ${JSON.stringify(missingText.slice(0, 5).map(item => item.text))}`)
+          if (forbiddenText.length) failures.push(`forbidden text present (${forbiddenText.length}): ${JSON.stringify(forbiddenText.slice(0, 5).map(item => item.text))}`)
+          if (!checks.scenarios.length || checks.scenarios.some(item => !item.passed)) failures.push('current Profile/Scenario request evidence is incomplete')
+          return respond(res, verified ? 200 : 422, { verified, checks,
+            sessionId, profileId: state.profileId, revision: state.revision, revisionId: state.revisionId, checkedAt, requestEvidence,
+            ...(!verified ? { code: BUSINESS_CONTROL_ERROR.previewVerificationFailed,
+              error: `Preview verification failed: ${failures.join('; ')}. Workflow retry keeps the saved route and text assertions; retry only after relevant preview state or evidence changes. Cross-page actions require separate page observations; do not reinterpret this failure as a pass.` } : {}),
+            pageObservation: pageObservation && { ...pageObservation, text: pageObservation.text.slice(0, 2000) } })
         }
         if (url.pathname === '/__desktop/create-profile' && req.method === 'POST') {
           let body = ''
@@ -1713,12 +1907,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
               const hash = new URL(storedState.url).hash.replace(/^#/, '')
               if (hash.startsWith('/') && !hash.startsWith('//')) route = hash
             } catch {}
-            sessionStates.set(storedSessionId, {
+            const resetState = {
               revision: storedState.revision + 1,
               profileId: '',
-              url: businessAppUrl(route),
+              revisionId: randomUUID(),
+              revisionStartedAt: new Date().toISOString(),
               verified: false,
-            })
+            }
+            sessionStates.set(storedSessionId, { ...resetState,
+              url: previewUrl(route, storedSessionId, resetState) })
             pageObservations.delete(storedSessionId)
             verificationResults.delete(storedSessionId)
             resetSessionIds.push(storedSessionId)
@@ -1735,14 +1932,16 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           routeParams.delete('__mockProfile')
           routeParams.delete('__previewReload')
           const cleanRoute = `${routePath}${routeParams.size ? `?${routeParams}` : ''}`
-          const target = new URL(businessAppUrl(cleanRoute))
-          target.searchParams.delete('__mockProfile')
-          target.searchParams.set('__dshSession', sessionId)
-          state = { revision: state.revision + 1, profileId: '', url: target.href, verified: false }
+          const resetState = { revision: state.revision + 1, profileId: '', revisionId: randomUUID(),
+            revisionStartedAt: new Date().toISOString(), verified: false }
+          state = { ...resetState, url: previewUrl(cleanRoute, sessionId, resetState) }
           sessionStates.set(sessionId, state)
           await persistSessionStates()
           pageObservations.delete(sessionId)
           verificationResults.delete(sessionId)
+          // Cookies are scoped to the host, not the port. Clear the Profile
+          // cookie set by the business dev server before the iframe reloads.
+          res.setHeader('Set-Cookie', '__mockProfile=; Path=/; Max-Age=0; SameSite=Lax')
           return respond(res, 200, { ...state, status: 'default' })
         }
         if (['/__desktop/apply', '/__desktop/apply-ui'].includes(url.pathname) && req.method === 'POST') {
@@ -1769,16 +1968,15 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           }
           const route = profile.routePath || profile.entryPath?.replace(/^\/?#/, '') || manifest.entryRoute
           if (!route.startsWith('/') || route.startsWith('//')) return respond(res, 422, { error: 'Invalid profile route' })
-          const target = new URL(businessAppUrl(route))
-          target.searchParams.set('__mockProfile', profileId)
-          target.searchParams.set('__dshSession', sessionId)
-          state = { revision: state.revision + 1, profileId, url: target.href, verified: false }
+          const nextState = { revision: state.revision + 1, profileId, revisionId: randomUUID(),
+            revisionStartedAt: new Date().toISOString(), verified: false }
+          state = { ...nextState, url: previewUrl(route, sessionId, nextState) }
           sessionStates.set(sessionId, state)
           await persistSessionStates()
           pageObservations.delete(sessionId)
           verificationResults.delete(sessionId)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
-          return respond(res, 200, { ...state, url: origin + state.url, status: 'applied-command', message: 'Preview will reload. Business outcome has not yet been verified.' })
+          return respond(res, 200, { ...state, status: 'applied-command', message: 'Preview will reload. Business outcome has not yet been verified.' })
         }
         return respond(res, 404, { error: 'Unknown desktop command' })
       }

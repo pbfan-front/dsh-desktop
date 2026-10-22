@@ -3,6 +3,7 @@ import type {
   BusinessScenarioWorkflowStartInput,
   BusinessScenarioWorkflowTarget,
   BusinessScenarioWorkflowVerification,
+  BusinessScenarioPreviewStep,
   BusinessWorkflowDefinition,
   BusinessWorkflowRun
 } from '../shared/business-workflow'
@@ -10,7 +11,7 @@ import type { BusinessControlPath } from './business-preview'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessPluginWorkflowDeclaration } from './business-plugin-contract'
 import type { BusinessPluginSemanticRule } from './business-plugin-contract'
-import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticSourceRequest } from '../shared/business-control-contract'
+import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, resolveSemanticIntent, validSemanticSourceRequest } from '../shared/business-control-contract'
 
 export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
@@ -51,7 +52,8 @@ export function registerBusinessScenarioWorkflow(options: {
       }, input.sessionId) as BusinessScenarioWorkflowTarget
       const resolveTargetMs = Math.max(0, nowMs() - resolveStartedAt)
       const analyzeStartedAt = nowMs()
-      const semanticExpectations = matchingSemanticRules({ ...input, target }, options.semanticRules)
+      const semanticContext = { ...context, target }
+      const { rules: semanticExpectations, resolution: intentResolution } = selectSemanticRules(semanticContext, options.semanticRules)
       const analysis = await options.requestBusiness('/__desktop/analyze-target', {
         routePath: target.routePath,
         query: input.query,
@@ -61,7 +63,7 @@ export function registerBusinessScenarioWorkflow(options: {
       const analyzeTargetMs = Math.max(0, nowMs() - analyzeStartedAt)
       return {
         output: analysis,
-        contextPatch: { analysis, target, semanticExpectations, requestTimings: { resolveTargetMs, analyzeTargetMs } }
+        contextPatch: { analysis, target, semanticExpectations, intentResolution, requestTimings: { resolveTargetMs, analyzeTargetMs } }
       }
     },
     'create-profile': async ({ context, previousOutput }) => {
@@ -106,19 +108,62 @@ export function registerBusinessScenarioWorkflow(options: {
     },
     'verify-preview': async ({ context, previousOutput }) => {
       const input = parseStartInput(context)
+      const plan = parsePlan(context.plan)
+      if (plan.verificationSteps) {
+        // parsePlan guarantees 1-5 steps; the length/order checks below bound every indexed lookup.
+        const progress = previewProgress(context)
+        if (progress.length !== plan.verificationSteps.length) throw workflowGateError('Complete every declared page check before final verification.')
+        progress.forEach((item, index) => {
+          if (item.id !== plan.verificationSteps![index]!.id) throw workflowGateError('Saved page check order does not match the confirmed plan.')
+          assertPreviewIdentity(item.result, input.sessionId, plan.profileId)
+          assertSamePreviewRevision(progress[0]!.result, item.result)
+        })
+        const last = plan.verificationSteps[plan.verificationSteps.length - 1]!
+        const verified = await options.requestBusiness('/__desktop/verify', {
+          route: last.route, containsText: last.containsText, absentText: last.absentText,
+          expectedProfileId: plan.profileId
+        }, input.sessionId)
+        const final = assertPreviewIdentity(verified, input.sessionId, plan.profileId)
+        assertSamePreviewRevision(progress[0]!.result, final)
+        return { output: { ...final, pageSteps: progress.map((item, index) => ({
+          id: item.id, expected: plan.verificationSteps![index], verification: item.result
+        })) } }
+      }
       const verification = parseVerification(previousOutput)
       const verified = await options.requestBusiness('/__desktop/verify', verification, input.sessionId)
       return { output: verified }
     }
   }, {
-    'business.preview-verification': ({ result }) => assertPreviewVerification(result.output)
+    'business.preview-verification': ({ context, result }) => {
+      assertPreviewVerification(result.output)
+      const steps = parsePlan(context.plan).verificationSteps
+      if (steps) {
+        const output = record(result.output, 'Multi-page verification result is missing.')
+        if (!Array.isArray(output.pageSteps) || output.pageSteps.length !== steps.length
+          || output.pageSteps.some((value, index) => record(value, 'Page verification result is invalid.').id !== steps[index]!.id)) {
+          throw workflowGateError('Preview verification gate requires every declared page check.')
+        }
+      }
+    }
   }, {
     pluginId: options.pluginId,
     compatibleRunVersions: options.definition?.compatibleRunVersions,
-    checkpointValidators: options.semanticRules?.length ? {
-      'confirm-plan': async ({ context, checkpointOutput }) => {
+    proposalCheckpoints: ['confirm-plan'],
+    checkpointValidators: {
+      'confirm-plan': async ({ context, checkpointOutput, proposal }) => {
         const rules = matchingSemanticRules(context, options.semanticRules)
+        if (!proposal && !options.semanticRules?.length && (!checkpointOutput || typeof checkpointOutput !== 'object'
+          || Array.isArray(checkpointOutput) || !('verificationSteps' in checkpointOutput))) return
+        if (proposal) assertAnalysisQuality(record(context.analysis, 'Workflow analysis result is missing.'))
         const plan = parsePlan(checkpointOutput)
+        if (proposal) {
+          const analysis = record(context.analysis, 'Workflow analysis result is missing.')
+          const requestError = profileCreationRequestError({ evidenceId: text(analysis.evidenceId, 'Workflow analysis evidenceId is missing.'),
+            profile: { id: plan.profileId, label: plan.label, branchLabel: plan.label, page: plan.page, routePath: parseTarget(context.target).routePath },
+            scenarios: plan.scenarios })
+          if (requestError) throw new Error(`Invalid proposal: ${requestError}`)
+        }
+        assertPreviewPlan(plan, parseTarget(context.target).routePath)
         assertSemanticPlan(rules, plan)
         assertSemanticSourceValues(rules, plan, record(context.analysis, 'Workflow analysis result is missing.'))
         const sourceRules = rules.filter(rule => rule.fieldAssertions.length && plan.scenarios.some(scenario =>
@@ -133,8 +178,36 @@ export function registerBusinessScenarioWorkflow(options: {
           if (!validSemanticSourceRequest(request)) throw new Error('Semantic source validation request does not satisfy the shared business control contract.')
           await options.requestBusiness('/__desktop/validate-semantic-source', request, parseStartInput(context).sessionId)
         }
+      },
+      'wait-for-preview': async ({ context, checkpointOutput }) => {
+        const plan = parsePlan(context.plan)
+        if (!plan.verificationSteps) return
+        const selection = record(checkpointOutput, 'Pass the next declared stepId for multi-page verification.')
+        if (selection.restartVerification === true && Object.keys(selection).length === 1) {
+          return { contextPatch: { previousPreviewVerifications: previewProgress(context), previewVerifications: [] }, continueWaiting: true }
+        }
+        if (Object.keys(selection).some(key => key !== 'stepId')) throw new Error('Page checks use the confirmed assertions; pass only stepId.')
+        const progress = previewProgress(context)
+        const next = plan.verificationSteps[progress.length]
+        if (!next || selection.stepId !== next.id) throw new Error(`Verify the next declared page step: ${next?.id ?? '(all captured)'}.`)
+        const input = parseStartInput(context)
+        const result = assertPreviewIdentity(await options.requestBusiness('/__desktop/verify', {
+          route: next.route, containsText: next.containsText, absentText: next.absentText,
+          expectedProfileId: plan.profileId, partial: true,
+          ...(next.apiUrls ? { apiUrls: next.apiUrls } : {})
+        }, input.sessionId), input.sessionId, plan.profileId)
+        if (progress.length) {
+          assertSamePreviewRevision(progress[0]!.result, result)
+          const previous = progress[progress.length - 1]!.result
+          const observation = record(result.pageObservation, 'Page observation is missing.')
+          if (Date.parse(String(observation.observedAt)) < Date.parse(String(previous.checkedAt))) {
+            throw workflowGateError('The next page needs a fresh observation after the preceding page check.')
+          }
+        }
+        const previewVerifications = [...progress, { id: next.id, result }]
+        return { contextPatch: { previewVerifications }, continueWaiting: previewVerifications.length < plan.verificationSteps.length }
       }
-    } : undefined,
+    },
     retryValidators: {
       'analyze-target': ({ error, retryInput }) => {
         if (error.code !== BUSINESS_CONTROL_ERROR.targetRouteAmbiguous) {
@@ -159,15 +232,32 @@ export function registerBusinessScenarioWorkflow(options: {
   return (input) => options.runtime.start({
     workflowId: BUSINESS_SCENARIO_WORKFLOW_ID,
     pluginId: options.pluginId,
-    context: { ...parseStartInput(input) }
+    context: { ...parseStartInput(input), semanticIntentContract: 1 }
   })
 }
 
 function matchingSemanticRules(context: Record<string, unknown>, rules: BusinessPluginSemanticRule[] = []): BusinessPluginSemanticRule[] {
+  return selectSemanticRules(context, rules).rules
+}
+
+function selectSemanticRules(context: Record<string, unknown>, rules: BusinessPluginSemanticRule[] = []) {
   const target = context.target && typeof context.target === 'object' && !Array.isArray(context.target)
     ? context.target as Record<string, unknown> : undefined
   const routePath = target?.routePath ?? context.routePath
-  return rules.filter(rule => rule.routePath === routePath && rule.intentEquals === context.query)
+  // Persisted pre-contract runs retain exact-query behavior; do not activate new
+  // rules retroactively on a plan a user already reviewed.
+  const candidates = context.semanticIntentContract === 1 ? rules : rules.map(rule => ({ ...rule, intentMatch: 'exact' as const }))
+  const resolution = resolveSemanticIntent(candidates, routePath, context.query)
+  if (resolution.status === 'ambiguous') throw Object.assign(new Error(
+    'Multiple plugin-declared intent clauses occur in this request. Clarify the business requirement in a new run before analysis or creation.'
+  ), { code: BUSINESS_CONTROL_ERROR.intentAmbiguous, retryable: false })
+  const selectedRules = rules.filter(rule => resolution.ruleIds.includes(rule.id))
+  if (context.semanticIntentContract === 1 && context.intentResolution
+    && (JSON.stringify(resolution) !== JSON.stringify(context.intentResolution)
+      || JSON.stringify(selectedRules) !== JSON.stringify(context.semanticExpectations))) throw Object.assign(new Error(
+    'Declared intent matching or semantic rules changed after analysis. Start a new reviewed run; do not reuse the old plan with different semantic rules.'
+  ), { code: BUSINESS_CONTROL_ERROR.intentChanged, retryable: false })
+  return { resolution, rules: selectedRules }
 }
 
 function assertSemanticPlan(rules: BusinessPluginSemanticRule[], plan: BusinessScenarioWorkflowPlan): void {
@@ -274,13 +364,42 @@ function parseStartInput(value: unknown): BusinessScenarioWorkflowStartInput {
   const query = text(input.query, 'query is required.', 1000)
   const apiUrls = input.apiUrls === undefined ? [] : stringArray(input.apiUrls, 'apiUrls', 12, 500)
   const sessionId = input.sessionId === undefined ? undefined : text(input.sessionId, 'sessionId is invalid.', 128)
+  const humanPromptAt = Number.isSafeInteger(input.humanPromptAt) && (input.humanPromptAt as number) >= 0
+    ? input.humanPromptAt as number : undefined
+  const humanPromptAdmittedAt = Number.isSafeInteger(input.humanPromptAdmittedAt)
+    && (input.humanPromptAdmittedAt as number) >= 0
+    && humanPromptAt !== undefined && (input.humanPromptAdmittedAt as number) <= humanPromptAt
+    ? input.humanPromptAdmittedAt as number : undefined
+  const agentTurnStartAt = Number.isSafeInteger(input.agentTurnStartAt)
+    && humanPromptAt !== undefined && (input.agentTurnStartAt as number) >= 0
+    && (input.agentTurnStartAt as number) <= humanPromptAt
+    && (humanPromptAdmittedAt === undefined || (input.agentTurnStartAt as number) >= humanPromptAdmittedAt)
+    ? input.agentTurnStartAt as number : undefined
+  const agentFirstStepAt = Number.isSafeInteger(input.agentFirstStepAt)
+    && agentTurnStartAt !== undefined && (input.agentFirstStepAt as number) >= agentTurnStartAt
+    && humanPromptAt !== undefined && (input.agentFirstStepAt as number) <= humanPromptAt
+    ? input.agentFirstStepAt as number : undefined
+  const observedAfterPrompt = (value: unknown): number | undefined => Number.isSafeInteger(value)
+    && (value as number) >= (humanPromptAt ?? Number.POSITIVE_INFINITY)
+    ? value as number : undefined
+  const agentFirstAssistantMessageAt = observedAfterPrompt(input.agentFirstAssistantMessageAt)
+  const agentFirstToolCallAt = observedAfterPrompt(input.agentFirstToolCallAt)
+  const workflowToolCallAt = observedAfterPrompt(input.workflowToolCallAt)
   if (sessionId && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(sessionId)) throw new Error('sessionId is unsafe.')
   return {
     ...(routePath ? { routePath } : {}),
     ...(targetPage ? { targetPage } : {}),
     query,
     apiUrls,
-    ...(sessionId ? { sessionId } : {})
+    ...(sessionId ? { sessionId } : {}),
+    ...(humanPromptAt !== undefined ? { humanPromptAt } : {}),
+    ...(humanPromptAdmittedAt !== undefined ? { humanPromptAdmittedAt } : {}),
+    ...(agentTurnStartAt !== undefined ? { agentTurnStartAt } : {}),
+    ...(agentFirstStepAt !== undefined ? { agentFirstStepAt } : {}),
+    ...(agentFirstAssistantMessageAt !== undefined ? { agentFirstAssistantMessageAt } : {}),
+    ...(agentFirstToolCallAt !== undefined ? { agentFirstToolCallAt } : {}),
+    ...(workflowToolCallAt !== undefined && (agentFirstToolCallAt === undefined
+      || workflowToolCallAt >= agentFirstToolCallAt) ? { workflowToolCallAt } : {})
   }
 }
 
@@ -326,7 +445,72 @@ function parsePlan(value: unknown): BusinessScenarioWorkflowPlan {
     profileId,
     label: text(plan.label, 'Profile label is required.', 200),
     page: text(plan.page, 'Profile page is required.', 64),
-    scenarios
+    scenarios,
+    ...(plan.verificationSteps === undefined ? {} : { verificationSteps: parsePreviewSteps(plan.verificationSteps) })
+  }
+}
+
+function parsePreviewSteps(value: unknown): BusinessScenarioPreviewStep[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 5) throw new Error('verificationSteps must contain 1-5 ordered page checks.')
+  const ids = new Set<string>()
+  return value.map(value => {
+    const step = record(value, 'Each page check must be an object.')
+    const id = text(step.id, 'Page check id is required.', 64)
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(id) || ids.has(id)) throw new Error('Page check ids must be safe and unique.')
+    ids.add(id)
+    const verification = parseVerification(step)
+    if (!verification.containsText.length || verification.containsText.some(text => !text.trim())) {
+      throw new Error('Each page check needs at least one nonempty required text assertion.')
+    }
+    const apiUrls = step.apiUrls === undefined ? undefined : stringArray(step.apiUrls, 'apiUrls', 12, 500)
+    if (apiUrls && (!apiUrls.length || apiUrls.some(api => !api.trim()))) throw new Error('Page check apiUrls must not be empty.')
+    return { ...verification, id, label: text(step.label, 'Page check label is required.', 200),
+      ...(apiUrls ? { apiUrls } : {}) }
+  })
+}
+
+function assertPreviewPlan(plan: BusinessScenarioWorkflowPlan, targetRoute: string): void {
+  if (!plan.verificationSteps) return
+  const routePath = (route: string): string => route.split('?')[0]!.replace(/\/+$/, '') || '/'
+  if (routePath(plan.verificationSteps[0]!.route) !== routePath(targetRoute)) {
+    throw new Error('The first page check must verify the analyzed target route.')
+  }
+  for (const step of plan.verificationSteps) {
+    if (step.apiUrls?.some(api => !plan.scenarios.some(scenario => scenario.apiUrl === api))) {
+      throw new Error('Page check APIs must be declared in the confirmed Profile plan.')
+    }
+  }
+}
+
+function previewProgress(context: Readonly<Record<string, unknown>>): Array<{ id: string; result: Record<string, unknown> }> {
+  const progress = context.previewVerifications ?? []
+  if (!Array.isArray(progress) || progress.length > 5) throw workflowGateError('Saved page verification progress is invalid.')
+  return progress.map(value => {
+    const item = record(value, 'Saved page verification is invalid.')
+    return { id: text(item.id, 'Saved page verification id is missing.', 64), result: record(item.result, 'Saved page evidence is missing.') }
+  })
+}
+
+function assertPreviewIdentity(value: unknown, sessionId: string | undefined, profileId: string): Record<string, unknown> {
+  assertPreviewVerification(value)
+  const output = record(value, 'Page verification result is missing.')
+  const observation = record(output.pageObservation, 'Page observation is missing.')
+  if (output.sessionId !== (sessionId || 'default') || output.profileId !== profileId
+    || !Number.isInteger(output.revision) || (output.revision as number) < 0
+    || typeof output.revisionId !== 'string' || !output.revisionId
+    || observation.revision !== output.revision || observation.revisionId !== output.revisionId
+    || observation.profileId !== output.profileId
+    || !Number.isFinite(Date.parse(String(output.checkedAt)))
+    || !Number.isFinite(Date.parse(String(observation.observedAt)))
+    || Date.parse(String(observation.observedAt)) > Date.parse(String(output.checkedAt))) {
+    throw workflowGateError('Page evidence must identify the same session, Profile and Runtime revision; upgrade the Runtime if identity fields are missing.')
+  }
+  return output
+}
+
+function assertSamePreviewRevision(first: Record<string, unknown>, current: Record<string, unknown>): void {
+  if (['sessionId', 'profileId', 'revision', 'revisionId'].some(key => first[key] !== current[key])) {
+    throw workflowGateError('Preview revision changed between page checks. While waiting, restart with {"restartVerification":true} and recapture all pages in one activation; do not combine old evidence. A failed final step needs a new reviewed run if its saved evidence has expired.')
   }
 }
 

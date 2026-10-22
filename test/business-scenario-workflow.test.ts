@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { registerBusinessScenarioWorkflow } from '../src/main/business-scenario-workflow'
 import { summarizeBusinessScenarioTiming } from '../src/main/business-scenario-timing'
 import { BusinessWorkflowRuntime } from '../src/main/business-workflow-runtime'
+import type { BusinessWorkflowRun } from '../src/shared/business-workflow'
 
 const startInput = {
   routePath: '/credit/productCombine',
@@ -32,7 +33,147 @@ const verification = {
   absentText: ['系统繁忙']
 }
 
+const pagePlan = { ...plan, verificationSteps: [
+  { id: 'list', label: '入口状态', ...verification, apiUrls: ['/quota/query.json'] },
+  { id: 'detail', label: '详情操作', route: '/credit/detail', containsText: ['操作入口'], absentText: ['系统繁忙'] }
+] }
+
+function pageResult(route: string, at: number, overrides: Record<string, unknown> = {}) {
+  return { verified: true, sessionId: 'session-1', profileId: plan.profileId, revision: 1, revisionId: 'activation-1',
+    checkedAt: new Date(at + 1).toISOString(),
+    pageObservation: { route, text: route === verification.route ? '核额失败' : '操作入口',
+      profileId: plan.profileId, revision: 1, revisionId: 'activation-1', observedAt: new Date(at).toISOString() },
+    checks: { currentProfile: true, observationCurrent: true, route: true, containsText: [], absentText: [],
+      scenarios: [{ apiUrl: '/quota/query.json', scenarioId: 'quota_fail', passed: true }] }, ...overrides }
+}
+
 describe('business scenario workflow', () => {
+  it('captures declared pages in order, persists the checkpoint, and verifies all APIs only at the end', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-pages' })
+    let time = 1000
+    const requestBusiness = vi.fn(async (path: string, body: unknown) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-pages' }
+      if (path === '/__desktop/verify') return pageResult((body as { route: string }).route, time += 100)
+      return { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    const waiting = await runtime.resume(analyzed.id, pagePlan)
+    expect(waiting.context.plan).toEqual(pagePlan)
+    const list = await runtime.resume(waiting.id, { stepId: 'list' })
+    expect(list.status).toBe('waiting_for_user')
+    expect(list.currentStepId).toBe('wait-for-preview')
+    expect(list.steps.find(step => step.id === 'verify-preview')?.status).toBe('pending')
+    expect(list.context.previewVerifications).toMatchObject([{ id: 'list', result: { verified: true, revisionId: 'activation-1' } }])
+    const restored = new BusinessWorkflowRuntime()
+    restored.restoreRuns([JSON.parse(JSON.stringify(list))])
+    registerBusinessScenarioWorkflow({ runtime: restored, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const completed = await restored.resume(list.id, { stepId: 'detail' })
+    expect(completed.status).toBe('completed')
+    const result = completed.steps.find(step => step.id === 'verify-preview')?.output
+    expect(result).toMatchObject({ verified: true, pageSteps: [{ id: 'list' }, { id: 'detail' }] })
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/verify').map(([, body]) => body)).toEqual([
+      { ...verification, apiUrls: ['/quota/query.json'], partial: true, expectedProfileId: plan.profileId },
+      { route: '/credit/detail', containsText: ['操作入口'], absentText: ['系统繁忙'], partial: true, expectedProfileId: plan.profileId },
+      { route: '/credit/detail', containsText: ['操作入口'], absentText: ['系统繁忙'], expectedProfileId: plan.profileId }
+    ])
+    expect(requestBusiness.mock.calls.some(([path]) => path === '/__desktop/apply')).toBe(false)
+  })
+
+  it('rejects skipped pages, assertion replacement and stale/cross-session/reapplied evidence without advancing', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-page-guards' })
+    let result = pageResult(verification.route, 1000)
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-pages' }
+      return path === '/__desktop/verify' ? result : { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    await runtime.resume((await start(startInput)).id, pagePlan)
+    await expect(runtime.resume('run-page-guards', { stepId: 'detail' })).rejects.toThrow('next declared page step: list')
+    await expect(runtime.resume('run-page-guards', verification)).rejects.toThrow('pass only stepId')
+    await expect(runtime.resume('run-page-guards', { stepId: 'list', containsText: [] })).rejects.toThrow('pass only stepId')
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/verify')).toHaveLength(0)
+    await runtime.resume('run-page-guards', { stepId: 'list' })
+    for (const invalid of [
+      pageResult('/credit/detail', 2000, { sessionId: 'session-other' }),
+      pageResult('/credit/detail', 2000, { profileId: 'other-profile' }),
+      pageResult('/credit/detail', 2000, { revisionId: 'activation-new' }),
+      pageResult('/credit/detail', 2000, { revision: 2 }),
+      pageResult('/credit/detail', 2000, { checkedAt: undefined }),
+      pageResult('/credit/detail', 1000),
+      pageResult('/credit/detail', 2000, { verified: false })
+    ]) {
+      result = invalid
+      await expect(runtime.resume('run-page-guards', { stepId: 'detail' })).rejects.toBeDefined()
+      expect(runtime.getRun('run-page-guards')?.context.previewVerifications).toHaveLength(1)
+      expect(runtime.getRun('run-page-guards')?.status).toBe('waiting_for_user')
+    }
+    result = pageResult('/credit/detail', 2000, {
+      revisionId: 'activation-new', pageObservation: { ...pageResult('/credit/detail', 2000).pageObservation, revisionId: 'activation-new' }
+    })
+    await expect(runtime.resume('run-page-guards', { stepId: 'detail' })).rejects.toMatchObject({ message: expect.stringContaining('Preview revision changed') })
+    const reset = await runtime.resume('run-page-guards', { restartVerification: true })
+    expect(reset.context.previewVerifications).toEqual([])
+    expect(reset.context.previousPreviewVerifications).toHaveLength(1)
+    expect(reset.status).toBe('waiting_for_user')
+    result = pageResult(verification.route, 2500)
+    await runtime.resume('run-page-guards', { stepId: 'list' })
+    result = pageResult('/credit/detail', 3000)
+    expect((await runtime.resume('run-page-guards', { stepId: 'detail' })).status).toBe('completed')
+  })
+
+  it('does not complete from partial API checks when final full-profile evidence is missing', async () => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-page-final-gate' })
+    let completeEvidence = false
+    let time = 1000
+    const requestBusiness = vi.fn(async (path: string, body: unknown) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-pages' }
+      if (path !== '/__desktop/verify') return { ok: true }
+      const input = body as { route: string; partial?: boolean }
+      const result = pageResult(input.route, time += 100)
+      return input.partial || completeEvidence ? result : { ...result, verified: false,
+        checks: { ...result.checks, scenarios: [{ apiUrl: '/detail/query.json', scenarioId: 'detail_data', passed: false }] } }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const twoApiPlan = { ...pagePlan, scenarios: [...pagePlan.scenarios,
+      { id: 'detail_data', apiUrl: '/detail/query.json', data: { result: 'DETAIL' } }] }
+    const analyzed = await start(startInput)
+    await runtime.resume(analyzed.id, twoApiPlan)
+    await runtime.resume(analyzed.id, { stepId: 'list' })
+    const failed = await runtime.resume(analyzed.id, { stepId: 'detail' })
+    expect(failed.status).toBe('failed')
+    expect(failed.currentStepId).toBe('verify-preview')
+    expect(failed.context.previewVerifications).toHaveLength(2)
+    expect(failed.steps.find(step => step.id === 'verify-preview')?.error?.message).toContain('stale or mismatched page evidence')
+    completeEvidence = true
+    expect((await runtime.retry(failed.id)).status).toBe('completed')
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/verify').slice(-2).map(([, input]) => input)).toEqual([
+      { route: '/credit/detail', containsText: ['操作入口'], absentText: ['系统繁忙'], expectedProfileId: plan.profileId },
+      { route: '/credit/detail', containsText: ['操作入口'], absentText: ['系统繁忙'], expectedProfileId: plan.profileId }
+    ])
+  })
+
+  it.each([
+    [], Array.from({ length: 6 }, (_, index) => ({ ...pagePlan.verificationSteps[0], id: `page${index}` })),
+    [pagePlan.verificationSteps[0], pagePlan.verificationSteps[0]],
+    [{ ...pagePlan.verificationSteps[0], route: '/unrelated/page' }],
+    [{ ...pagePlan.verificationSteps[0], apiUrls: ['/unrelated/api.json'] }],
+    [{ ...pagePlan.verificationSteps[0], containsText: [] }],
+    [{ ...pagePlan.verificationSteps[0], containsText: [''] }],
+    [{ ...pagePlan.verificationSteps[0], route: '//untrusted.test/page' }]
+  ])('rejects invalid page plans before creating any Profile (%#)', async (...steps) => {
+    const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-invalid-pages' })
+    const requestBusiness = vi.fn(async (path: string) => path === '/__desktop/resolve-target' ? resolvedTarget : { evidenceId: 'evidence-1' })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    await expect(runtime.resume(analyzed.id, { ...plan, verificationSteps: steps })).rejects.toBeDefined()
+    expect(requestBusiness.mock.calls.some(([path]) => path === '/__desktop/create-profile')).toBe(false)
+    expect(runtime.getRun(analyzed.id)?.currentStepId).toBe('confirm-plan')
+  })
+
   it('keeps ambiguous route candidates in one run and analyzes only after user-confirmed selection', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-ambiguous' })
     const candidates = [
@@ -79,7 +220,7 @@ describe('business scenario workflow', () => {
   })
 
   it('separates request work from plan and preview waiting in persisted runs', async () => {
-    let wallMs = 0
+    let wallMs = 200
     let monotonicMs = 0
     const runtime = new BusinessWorkflowRuntime({
       idFactory: () => 'run-timing',
@@ -100,7 +241,18 @@ describe('business scenario workflow', () => {
       return { ok: true }
     })
     const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness, nowMs: () => monotonicMs })
-    const analyzed = await start(startInput)
+    const promptAt = Date.UTC(2026, 9, 5)
+    const analyzed = await start({ ...startInput, humanPromptAt: promptAt, humanPromptAdmittedAt: promptAt - 400,
+      agentTurnStartAt: promptAt - 100, agentFirstStepAt: promptAt - 80,
+      agentFirstAssistantMessageAt: promptAt + 50,
+      agentFirstToolCallAt: promptAt + 90, workflowToolCallAt: promptAt + 150 })
+    expect(summarizeBusinessScenarioTiming(analyzed)).toMatchObject({
+      humanPromptEntryToWorkflowStartMs: 200, humanPromptAdmissionToWorkflowStartMs: 600,
+      humanPromptQueueWaitMs: 300, agentTurnStartToWorkflowStartMs: 300,
+      agentTurnStartToFirstStepMs: 20, firstStepToModelVisibleMessageMs: 80,
+      modelVisibleMessageToAssistantMessageMs: 50, assistantMessageToFirstToolCallMs: 40,
+      firstToolCallToWorkflowToolCallMs: 60, workflowToolCallToWorkflowStartMs: 50
+    })
     expect(summarizeBusinessScenarioTiming(analyzed)?.phases).toMatchObject({ resolveTargetMs: 20, analyzeTargetMs: 80 })
     expect(summarizeBusinessScenarioTiming(analyzed)?.phases.confirmPlanWaitMs).toBeUndefined()
 
@@ -115,6 +267,7 @@ describe('business scenario workflow', () => {
       createProfileMs: 10, applyProfileMs: 0, previewWaitMs: 2000, verifyPreviewMs: 10
     })
     expect(summarizeBusinessScenarioTiming(JSON.parse(JSON.stringify(completed)))).toEqual(summary)
+    expect(summarizeBusinessScenarioTiming({ ...completed, context: { ...completed.context, humanPromptAt: Date.UTC(2026, 9, 6) } })?.humanPromptEntryToWorkflowStartMs).toBeUndefined()
     expect(summarizeBusinessScenarioTiming({ ...completed, workflowId: 'other-workflow' })).toBeUndefined()
   })
 
@@ -447,5 +600,43 @@ describe('business scenario workflow', () => {
     expect(rejected.status).toBe('failed')
     expect(rejected.currentStepId).toBe('verify-preview')
     expect(rejected.steps[5]?.error).toMatchObject({ code: 'WORKFLOW_GATE_REJECTED', retryable: true })
+  })
+
+  it('does not claim preview timing without a current verified page observation', () => {
+    const start = Date.UTC(2026, 9, 13)
+    const at = (offset: number): string => new Date(start + offset).toISOString()
+    const completed: BusinessWorkflowRun = {
+      id: 'timing-observation', workflowId: 'business-scenario-create', workflowVersion: '1',
+      pluginId: 'com.dataelement.demo-test', status: 'completed',
+      context: { profileId: 'selected-profile', humanPromptAt: start - 500,
+        humanPromptAdmittedAt: start - 1000 },
+      steps: [
+        { id: 'confirm-plan', type: 'checkpoint', title: '确认方案', status: 'completed', evidenceIds: [],
+          startedAt: at(100), completedAt: at(2000) },
+        { id: 'create-profile', type: 'deterministic', title: '创建分支', status: 'completed', evidenceIds: [],
+          startedAt: at(2500), completedAt: at(3000) },
+        { id: 'wait-for-preview', type: 'checkpoint', title: '确认预览', status: 'completed', evidenceIds: [],
+          startedAt: at(4000), completedAt: at(7000) },
+        { id: 'verify-preview', type: 'deterministic', title: '验证预览', status: 'completed', evidenceIds: [],
+          startedAt: at(7500), completedAt: at(8000), output: { verified: true,
+            checks: { currentProfile: true, observationCurrent: true, route: true,
+              containsText: [{ passed: true }], absentText: [], scenarios: [{ passed: true }] },
+            pageObservation: { profileId: 'selected-profile', observedAt: at(6000) } } }
+      ], createdAt: at(0), updatedAt: at(10000)
+    }
+    expect(summarizeBusinessScenarioTiming(completed)).toMatchObject({
+      humanPromptEntryToObservedPreviewMs: 6500, humanPromptAdmissionToObservedPreviewMs: 7000,
+      workflowStartToObservedPreviewMs: 6000, profileCreatedToObservedPreviewMs: 3000,
+      observedPreviewToVerificationMs: 2000, humanPromptAdmissionToVerifiedPreviewMs: 9000,
+      phases: { planConfirmationToCreationStartMs: 500, previewConfirmationToVerificationStartMs: 500 }
+    })
+    const stale = structuredClone(completed)
+    const staleOutput = stale.steps[3]?.output as { pageObservation: { observedAt: string } }
+    staleOutput.pageObservation.observedAt = at(2000)
+    expect(summarizeBusinessScenarioTiming(stale)?.workflowStartToObservedPreviewMs).toBeUndefined()
+    const unverified = structuredClone(completed)
+    const unverifiedOutput = unverified.steps[3]?.output as { verified: boolean }
+    unverifiedOutput.verified = false
+    expect(summarizeBusinessScenarioTiming(unverified)?.workflowStartToObservedPreviewMs).toBeUndefined()
   })
 })

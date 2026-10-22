@@ -21,7 +21,7 @@ export type BusinessControlPath =
   | '/__desktop/verify'
 
 export type BusinessWorkflowCommand = {
-  action: 'start-scenario' | 'resume' | 'retry' | 'cancel' | 'list' | 'get'
+  action: 'start-scenario' | 'propose-plan' | 'resume' | 'retry' | 'cancel' | 'list' | 'get'
   payload?: unknown
 }
 
@@ -154,7 +154,7 @@ export class BusinessPreview {
     if (!message || typeof message !== 'object') return
     const request = message as Record<string, unknown>
     if (typeof request.id !== 'string' || !/^[0-9a-f-]{36}$/.test(request.id)) return
-    const actions = new Set(['start-scenario', 'resume', 'retry', 'cancel', 'list', 'get'])
+    const actions = new Set(['start-scenario', 'propose-plan', 'resume', 'retry', 'cancel', 'list', 'get'])
     if (typeof request.action !== 'string' || !actions.has(request.action)) return
     if (!this.options.onWorkflowCommand) {
       child.send?.({ type: 'workflow-response', id: request.id, ok: false, error: 'Business workflow runtime is unavailable.' })
@@ -167,7 +167,10 @@ export class BusinessPreview {
       })
       child.send?.({ type: 'workflow-response', id: request.id, ok: true, result })
     } catch (error) {
-      child.send?.({ type: 'workflow-response', id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) })
+      const detail = error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? `${'code' in error && typeof error.code === 'string' ? `${error.code.slice(0, 100)}: ` : ''}${error.message.slice(0, 2000)}`
+        : String(error).slice(0, 2000)
+      child.send?.({ type: 'workflow-response', id: request.id, ok: false, error: detail })
     }
   }
 

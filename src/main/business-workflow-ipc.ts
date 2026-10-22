@@ -1,6 +1,7 @@
 import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
+import { approveBusinessScenarioPlan } from './business-scenario-plan'
 
 const safeRunId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/
 
@@ -17,15 +18,33 @@ export function registerBusinessWorkflowHandlers(options: BusinessWorkflowIpcOpt
   register(options, 'business-workflow:get', (runtime, runId) => ({
     run: runtime.getRun(parseRunId(runId)) ?? null
   }))
-  register(options, 'business-workflow:resume', async (runtime, runId, checkpointOutput) => ({
-    run: await runtime.resume(parseRunId(runId), checkpointOutput)
-  }))
-  register(options, 'business-workflow:retry', async (runtime, runId) => ({
-    run: await runtime.retry(parseRunId(runId))
+  register(options, 'business-workflow:approve-proposal', async (runtime, runId, selection) => {
+    try { return { run: await approveBusinessScenarioPlan(runtime, parseRunId(runId), selection) } }
+    catch (error) { throw workflowIpcError(error) }
+  })
+  register(options, 'business-workflow:resume', async (runtime, runId, checkpointOutput) => {
+    try {
+      return { run: await runtime.resume(parseRunId(runId), checkpointOutput) }
+    } catch (error) {
+      // Electron preserves Error.message, not a plain workflow-gate object's
+      // custom fields. Keep bounded diagnostics without returning a fake run.
+      throw workflowIpcError(error)
+    }
+  })
+  register(options, 'business-workflow:retry', async (runtime, runId, retryInput) => ({
+    run: await runtime.retry(parseRunId(runId), retryInput)
   }))
   register(options, 'business-workflow:cancel', async (runtime, runId) => ({
     run: await runtime.cancel(parseRunId(runId))
   }))
+}
+
+function workflowIpcError(error: unknown): unknown {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && !(error instanceof Error)) {
+    const code = 'code' in error && typeof error.code === 'string' ? `${error.code.slice(0, 100)}: ` : ''
+    return new Error(`${code}${error.message.slice(0, 2000)}`)
+  }
+  return error
 }
 
 function registerStartScenario(options: BusinessWorkflowIpcOptions): void {

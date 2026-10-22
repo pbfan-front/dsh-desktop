@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AvailableRelease, UpdateStatus } from '../shared/contracts'
-import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRun } from '../shared/business-workflow'
+import type { BusinessScenarioWorkflowStartInput, BusinessWorkflowRouteSelection, BusinessWorkflowRun, BusinessWorkflowProposalApproval } from '../shared/business-workflow'
 import { setupDesktopStoragePersistence } from './desktop-storage'
 import {
   isUpdateDismissed,
@@ -630,7 +630,10 @@ contextBridge.exposeInMainWorld(
     businessWorkflowRun: (runId: string): Promise<{ run: BusinessWorkflowRun | null }> => ipcRenderer.invoke('business-workflow:get', runId),
     resumeBusinessWorkflow: (runId: string, checkpointOutput?: unknown): Promise<{ run: BusinessWorkflowRun }> =>
       ipcRenderer.invoke('business-workflow:resume', runId, checkpointOutput),
-    retryBusinessWorkflow: (runId: string): Promise<{ run: BusinessWorkflowRun }> => ipcRenderer.invoke('business-workflow:retry', runId),
+    approveBusinessWorkflowProposal: (runId: string, selection: BusinessWorkflowProposalApproval): Promise<{ run: BusinessWorkflowRun }> =>
+      ipcRenderer.invoke('business-workflow:approve-proposal', runId, selection),
+    retryBusinessWorkflow: (runId: string, routeSelection?: BusinessWorkflowRouteSelection): Promise<{ run: BusinessWorkflowRun }> =>
+      ipcRenderer.invoke('business-workflow:retry', runId, routeSelection),
     cancelBusinessWorkflow: (runId: string): Promise<{ run: BusinessWorkflowRun }> => ipcRenderer.invoke('business-workflow:cancel', runId),
     onBusinessWorkflowChanged: (listener: (run: BusinessWorkflowRun) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, run: BusinessWorkflowRun): void => listener(run)

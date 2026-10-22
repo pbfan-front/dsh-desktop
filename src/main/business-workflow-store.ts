@@ -140,6 +140,13 @@ function isWorkflowRun(value: unknown): value is BusinessWorkflowRun {
   if (!isRecord(value.context) || !Array.isArray(value.steps)) return false
   if (!isString(value.createdAt) || !isString(value.updatedAt)) return false
   if (value.currentStepId !== undefined && !isString(value.currentStepId)) return false
+  if (value.checkpointProposal !== undefined) {
+    const proposal = value.checkpointProposal
+    if (!isRecord(proposal) || !isString(proposal.id) || !/^[0-9a-f-]{36}$/.test(proposal.id)
+      || !isString(proposal.checkpointId) || !isString(proposal.proposedAt)
+      || !Number.isFinite(Date.parse(proposal.proposedAt)) || proposal.output === undefined
+      || JSON.stringify(proposal.output).length > 131072) return false
+  }
   return value.steps.every(isWorkflowStepRun)
 }
 
@@ -150,6 +157,7 @@ function isWorkflowStepRun(value: unknown): value is BusinessWorkflowStepRun {
   if (!Array.isArray(value.evidenceIds) || !value.evidenceIds.every(isString)) return false
   if (value.startedAt !== undefined && !isString(value.startedAt)) return false
   if (value.completedAt !== undefined && !isString(value.completedAt)) return false
+  if (value.confirmedProposalId !== undefined && (!isString(value.confirmedProposalId) || !/^[0-9a-f-]{36}$/.test(value.confirmedProposalId))) return false
   if (value.error !== undefined) {
     if (!isRecord(value.error) || !isString(value.error.code) || !isString(value.error.message) || typeof value.error.retryable !== 'boolean') return false
     if (value.error.candidates !== undefined && (!Array.isArray(value.error.candidates) || value.error.candidates.length > 8

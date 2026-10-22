@@ -1,111 +1,104 @@
 import { readFile } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { serializeBusinessWorkflowReply } from './workflow-summary.js'
+import { parseProposedBusinessPlan } from './reuse-plan.js'
+export { compactBusinessAnalysis, compactBusinessWorkflowRun } from './workflow-summary.js'
 
 export const name = 'dsh-desktop-business'
 export const inject = ['tools', 'workspaceRegistry', 'webServer']
 
 const WORKFLOW_ROUTES = new Set([
   '/__desktop/workflow/start-scenario',
+  '/__desktop/workflow/propose-plan',
   '/__desktop/workflow/resume',
   '/__desktop/workflow/get',
   '/__desktop/workflow/retry',
   '/__desktop/workflow/cancel'
 ])
 
-function limited(values, limit) {
-  return Array.isArray(values) ? values.slice(0, limit) : values
-}
-
-function matchedScenarioIds(analysis, apiUrl) {
-  return new Set([
-    ...(analysis.analysisPlan?.existingScenarioMatches || [])
-      .filter(match => match.apiUrl === apiUrl)
-      .map(match => match.scenarioId),
-    ...(analysis.analysisPlan?.suggestedPlan?.scenarios || [])
-      .filter(scenario => scenario.apiUrl === apiUrl)
-      .map(scenario => scenario.sourceScenarioId)
-  ].filter(Boolean))
-}
-
-function compactScenarios(analysis, api) {
-  if (!Array.isArray(api.scenarios)) return api.scenarios
-  const matched = matchedScenarioIds(analysis, api.apiUrl)
-  const selected = [
-    ...api.scenarios.filter(scenario => matched.has(scenario.id)),
-    ...api.scenarios.filter(scenario => !matched.has(scenario.id))
-  ]
-  return selected.slice(0, 8).map(scenario => ({
-    ...scenario,
-    changedFields: limited(scenario.changedFields, 24),
-    fieldImpact: scenario.fieldImpact ? {
-      ...scenario.fieldImpact,
-      consumedFields: limited(scenario.fieldImpact.consumedFields, 24),
-      unprovenFields: limited(scenario.fieldImpact.unprovenFields, 24),
-      evidence: Array.isArray(scenario.fieldImpact.evidence)
-        ? scenario.fieldImpact.evidence.slice(0, 8).map(item => ({ ...item, evidence: limited(item.evidence, 2) }))
-        : scenario.fieldImpact.evidence
-    } : scenario.fieldImpact
-  }))
-}
-
-function compactApi(analysis, api) {
-  if (!api || typeof api !== 'object') return api
+// Host inbox admission, turn start and model-visible message commit are
+// distinct clocks. Keep message IDs and timestamps, never text.
+export function createHumanPromptTimingTracker() {
+  const sessions = new WeakMap()
   return {
-    ...api,
-    evidence: limited(api.evidence, 4),
-    envelopeFields: limited(api.envelopeFields, 24),
-    fields: limited(api.fields, 40),
-    scenarios: compactScenarios(analysis, api)
-  }
-}
-
-/**
- * Bound the evidence returned to the Agent without changing the workflow's
- * persisted analysis. The full run remains available through detail=full.
- */
-export function compactBusinessAnalysis(analysis) {
-  if (!analysis || typeof analysis !== 'object' || !Array.isArray(analysis.apis)) return analysis
-  const priorityApiUrls = [...new Set([
-    ...(analysis.analysisPlan?.suggestedPlan?.scenarios || []).map(scenario => scenario.apiUrl),
-    ...(analysis.analysisPlan?.existingScenarioMatches || []).map(match => match.apiUrl),
-    ...(analysis.analysisPlan?.focusApiUrls || [])
-  ].filter(Boolean))]
-  const focused = priorityApiUrls
-    .map(apiUrl => analysis.apis.find(api => api?.apiUrl === apiUrl))
-    .filter(Boolean)
-  const selected = (focused.length > 0 ? focused : analysis.apis).slice(0, 6)
-  return {
-    ...analysis,
-    apis: selected.map(api => compactApi(analysis, api)),
-    compaction: {
-      mode: 'summary',
-      totalApiCount: analysis.apis.length,
-      returnedApiCount: selected.length,
-      omittedApiCount: Math.max(0, analysis.apis.length - selected.length),
-      fullEvidenceAvailable: true,
-      fullEvidenceHint: 'Call business_scenario_workflow_status with detail=full only when focused evidence is insufficient or ambiguous.'
+    observe(session, event) {
+      if (!session || typeof session !== 'object') return
+      let state = sessions.get(session)
+      if (!state) {
+        state = { admitted: new Map(), open: false, turnStartAt: undefined, enteredAt: undefined, admittedAt: undefined,
+          firstStepAt: undefined, firstAssistantMessageAt: undefined, firstToolCallAt: undefined, workflowToolCallAt: undefined }
+        sessions.set(session, state)
+      }
+      if (event.type === 'agent/inbox/spliced' && Number.isSafeInteger(event.time) && event.time >= 0) {
+        for (const message of event.data?.inserted || []) {
+          if (message?.source?.kind !== 'user' || typeof message.id !== 'string') continue
+          state.admitted.set(message.id, event.time)
+          if (state.admitted.size > 256) state.admitted.delete(state.admitted.keys().next().value)
+        }
+      } else if (event.type === 'turn/start') {
+        state.open = true
+        state.turnStartAt = Number.isSafeInteger(event.time) && event.time >= 0 ? event.time : undefined
+        state.enteredAt = undefined
+        state.admittedAt = undefined
+        state.firstStepAt = undefined
+        state.firstAssistantMessageAt = undefined
+        state.firstToolCallAt = undefined
+        state.workflowToolCallAt = undefined
+      } else if (event.type === 'turn/end') {
+        state.open = false
+        state.turnStartAt = undefined
+        state.enteredAt = undefined
+        state.admittedAt = undefined
+        state.firstStepAt = undefined
+        state.firstAssistantMessageAt = undefined
+        state.firstToolCallAt = undefined
+        state.workflowToolCallAt = undefined
+      } else if (event.type === 'user/message' && event.data?.source?.kind === 'user' && state.open) {
+        if (!Number.isSafeInteger(event.time) || event.time < 0) return
+        state.enteredAt = event.time
+        const admittedAt = state.admitted.get(event.data.id)
+        state.admittedAt = admittedAt !== undefined && admittedAt <= event.time ? admittedAt : undefined
+        state.firstAssistantMessageAt = undefined
+        state.firstToolCallAt = undefined
+        state.workflowToolCallAt = undefined
+        state.admitted.delete(event.data.id)
+      } else if (state.open && Number.isSafeInteger(event.time) && event.time >= 0) {
+        if (event.type === 'step/start' && state.firstStepAt === undefined
+          && state.turnStartAt !== undefined && event.time >= state.turnStartAt) state.firstStepAt = event.time
+        if (state.enteredAt === undefined || event.time < state.enteredAt) return
+        if (event.type === 'assistant/message' && state.firstAssistantMessageAt === undefined) {
+          state.firstAssistantMessageAt = event.time
+        }
+        if (event.type === 'tool/call') {
+          if (state.firstToolCallAt === undefined) state.firstToolCallAt = event.time
+          if (event.data?.name === 'business_start_scenario_workflow' && state.workflowToolCallAt === undefined) {
+            state.workflowToolCallAt = event.time
+          }
+        }
+      }
+    },
+    timestamps(session) {
+      if (!session || typeof session !== 'object') return undefined
+      const state = sessions.get(session)
+      return state?.open && state.enteredAt !== undefined
+        ? { humanPromptAt: state.enteredAt,
+          ...(state.admittedAt !== undefined ? { humanPromptAdmittedAt: state.admittedAt } : {}),
+          ...(state.turnStartAt !== undefined && state.turnStartAt <= state.enteredAt
+            ? { agentTurnStartAt: state.turnStartAt } : {}),
+          ...(state.firstStepAt !== undefined ? { agentFirstStepAt: state.firstStepAt } : {}),
+          ...(state.firstAssistantMessageAt !== undefined ? { agentFirstAssistantMessageAt: state.firstAssistantMessageAt } : {}),
+          ...(state.firstToolCallAt !== undefined ? { agentFirstToolCallAt: state.firstToolCallAt } : {}),
+          ...(state.workflowToolCallAt !== undefined ? { workflowToolCallAt: state.workflowToolCallAt } : {}) }
+        : undefined
     }
-  }
-}
-
-export function compactBusinessWorkflowRun(run) {
-  if (!run || typeof run !== 'object') return run
-  return {
-    ...run,
-    context: run.context?.analysis
-      ? { ...run.context, analysis: compactBusinessAnalysis(run.context.analysis) }
-      : run.context,
-    steps: Array.isArray(run.steps)
-      ? run.steps.map(step => step.id === 'analyze-target' && step.output
-        ? { ...step, output: compactBusinessAnalysis(step.output) }
-        : step)
-      : run.steps
   }
 }
 
 export async function apply(ctx) {
   const descriptor = process.env.DSH_BUSINESS_CONNECTION_FILE
   if (!descriptor) return
+  const promptTiming = createHumanPromptTimingTracker()
+  ctx.on('session/event', (session, event) => promptTiming.observe(session, event))
   async function connection() {
     const value = JSON.parse(await readFile(descriptor, 'utf8'))
     if (new URL(value.origin).hostname !== '127.0.0.1' || !value.token) throw new Error('Invalid desktop business connection')
@@ -144,21 +137,29 @@ export async function apply(ctx) {
     }
   }), 'dsh-desktop-business: preview discovery route')
   const specs = [
-    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. If target resolution is ambiguous, show the saved candidate routes and ask the user to select one before retrying this same run; do not guess. Otherwise it performs evidence analysis and pauses before any write. Follow analysisPlan.qualityGate: ready may proceed to confirmation, review requires focused evidence review, and insufficient must stop for target refinement. For review, present analysisPlan.reviewPacket: why confidence is low, the leading candidate and alternatives, consumed versus unproven fields, and source evidence; compare actual Mock values to the requested business state before proposing reuse. Use rankingBreakdown for score attribution; unproven fields are not proven to be required or unused. analysisPlan.fieldImpact.candidateOnly means evidence exists but automatic reuse is not justified. Source consumption is preflight evidence only; final iframe verification remains mandatory. Use focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The default response contains bounded focused evidence; use business_scenario_workflow_status detail=full only when focused evidence is insufficient. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan only when allowed, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
+    ['business_propose_scenario_plan', 'Save a reviewed, complete Mock plan for explicit user confirmation in the Workflows panel. Only valid at confirm-plan for this conversation. Pass planJson with profileId, label, page, scenarios and any reviewed verificationSteps, using the same plan rules as business_resume_scenario_workflow. First review the actual Mock values and source/semantic evidence; never propose automatic reuse from a review gate without focused review. This validates and persists a versioned proposal ONLY: it does not approve, create, apply, or verify a Profile. Tell the user to review the target, APIs, source/data and page assertions in the panel, then click Confirm and create. A replacement proposal invalidates the old confirmation. Do not call resume just because proposal submission succeeded. The original conversation-confirmed resume path remains available when the user explicitly chooses it.', '/__desktop/workflow/propose-plan', {
+      runId: { type: 'string', required: true, description: 'This conversation’s paused workflow run ID.' },
+      planJson: { type: 'string', required: true, description: 'Reviewed full Profile plan JSON; or shorthand with the literal top-level "format":"source-reuse-v1" plus profileId,label,page,reuse:[{apiUrl,sourceScenarioId,label?}],checks:[{route,containsText,absentText,label?,apiUrls?}]. The format field is required for shorthand; it generates only mechanical Scenario/check IDs. Never just a suggested-plan reference or approval boolean.' }
+    }, args => ({ runId: args.runId, plan: parseProposedBusinessPlan(args.planJson) })],
+    ['business_start_scenario_workflow', 'Default stateful entry for creating a business Mock scenario. Target priority is explicit routePath, explicit targetPage, a uniquely recognized page in the business intent, then the current preview page. The current page is only a fallback and must not override a cross-page request. If target resolution reports E_TARGET_ROUTE_AMBIGUOUS, immediately show its saved candidate routes and ask the user to choose before any repository search, source reading, or retry. The candidates are unordered, not recommendations: do not preselect or label one Recommended based on position or lexical route-name match. If the question UI requires a recommended default, ask a neutral plain-text route question instead. Source research cannot authorize a route choice; do not guess. Otherwise it performs evidence analysis and pauses before any write. Follow analysisPlan.qualityGate: ready may proceed to confirmation, review requires focused evidence review, and insufficient must stop for target refinement. For ready, compare actual Mock values in analysisPlan.leadingScenarioValuePreview with the requested business state before proposing reuse. For review, present analysisPlan.reviewPacket: why confidence is low, the leading candidate and alternatives, consumed versus unproven fields, and source evidence; compare actual Mock values in valuePreview to the requested business state before proposing reuse. Value previews are bounded and not final UI proof. When needed values are absent, call business_inspect_mock_scenario with the evidence-backed exact API/Scenario and typed paths first. Retain focused source searches and relevant line-range inspection if the tool is unavailable, fails or lacks a special field. Never read an entire mock.json unless focused inspection cannot resolve a documented gap. Use rankingBreakdown for score attribution; unproven fields are not proven to be required or unused. analysisPlan.fieldImpact.candidateOnly means evidence exists but automatic reuse is not justified. Source consumption is preflight evidence only; final iframe verification remains mandatory. Use focusApiUrls and existingScenarioMatches first; do not grep the whole repository when repositorySearch is not-needed. The default response contains bounded focused evidence; use business_scenario_workflow_status detail=full only when focused evidence is insufficient. Return the run ID, resolved target and analysis to the user, prepare a reviewed plan only when allowed, then call business_resume_scenario_workflow.', '/__desktop/workflow/start-scenario', {
       routePath: { type: 'string', description: 'Optional exact target business hash route beginning with /. Omit when the intent or current preview should resolve it.' },
       targetPage: { type: 'string', description: 'Optional target business page name or route hint. This takes priority over the current preview page.' },
-      query: { type: 'string', required: true, description: 'Business scenario intent used for evidence analysis.' },
+      query: { type: 'string', required: true, description: 'Preserve the business request, concrete identifiers and details. Never replace it with a guessed canonical label to activate a semantic rule.' },
       apiUrlsJson: { type: 'string', description: 'Optional JSON array of exact API URLs already supported by source evidence.' }
     }, args => ({ ...(args.routePath ? { routePath: args.routePath } : {}), ...(args.targetPage ? { targetPage: args.targetPage } : {}), query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
-    ['business_resume_scenario_workflow', 'Resume a paused stateful scenario workflow. At confirm-plan review analysis.analysisPlan.suggestedPlan, reviewPacket, semanticValueChecks and context.semanticExpectations when present. A review quality gate does not justify automatic reuse. For plugin-declared paths, inspect the actual Mock value comparison: conflict means do not reuse, unknown means inspect further, and matched values still require source Scenario approval and user confirmation. Undeclared business fields remain unverified. In reviewPacket, autoReuseEligibility explains why the top candidate may have field evidence while strongestScenarioHasFieldImpact is false. Then pass checkpointJson with profileId, label, page and scenarios. Business-authored semantic expectations are checked before any Profile write. A scenario must contain either object data for a new Mock state or sourceScenarioId to clone an existing reviewed Scenario, never both. At wait-for-preview call only after the page settles and pass route, containsText and absentText. The workflow preserves its timeline and deterministic gates.', '/__desktop/workflow/resume', {
+    ['business_resume_scenario_workflow', 'Resume a paused stateful scenario workflow. At confirm-plan review analysis.analysisPlan.suggestedPlan, leadingScenarioValuePreview, reviewPacket, semanticValueChecks and context.semanticExpectations when present. A review quality gate does not justify automatic reuse. For plugin-declared paths, inspect the actual Mock value comparison: conflict means do not reuse, unknown means inspect further, and matched values still require source Scenario approval and user confirmation. Undeclared business fields remain unverified. In reviewPacket, autoReuseEligibility explains why the top candidate may have field evidence while strongestScenarioHasFieldImpact is false. Then pass checkpointJson with profileId, label, page and scenarios. Business-authored semantic expectations are checked before any Profile write. A scenario must contain either object data for a new Mock state or sourceScenarioId to clone an existing reviewed Scenario, never both. For a cross-page requirement, include 1-5 ordered verificationSteps in the confirmed plan: each has id, label, route, containsText, absentText and optional apiUrls subset of the plan APIs. The first step must check the analyzed target; separate list status from detail actions instead of combining their text assertions on one route. At wait-for-preview after the current page settles pass only {stepId} for the next declared check. Partial success retains this checkpoint, not overall success; show progress and ask the user to navigate to the next declared page, without submitting real business actions. The last step rechecks the current page and all Profile API hits before completion. Branch reselection or Runtime restart invalidates the captured revision: while waiting, {restartVerification:true} restarts page checks and retains the last attempt for diagnosis. Never weaken saved assertions or spin on an unchanged failure. For plans without verificationSteps, retain the single-page input {route,containsText,absentText}. The workflow preserves its timeline and deterministic gates.', '/__desktop/workflow/resume', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
-      checkpointJson: { type: 'string', required: true, description: 'JSON object for the current checkpoint.' }
+      checkpointJson: { type: 'string', required: true, description: 'Confirmed Profile plan (optional ordered verificationSteps), next {stepId} for a multi-page check, {restartVerification:true} to recapture while waiting, or legacy single-page {route,containsText,absentText}.' }
     }, args => ({ runId: args.runId, checkpointOutput: JSON.parse(args.checkpointJson) })],
-    ['business_scenario_workflow_status', 'Read one stateful scenario workflow timeline, including current checkpoint, completed steps and structured failure. The default summary keeps focused evidence only. Request detail=full only when focused evidence is insufficient or ambiguous; this does not rerun analysis.', '/__desktop/workflow/get', {
+    ['business_scenario_workflow_status', 'Read one stateful scenario workflow timeline, including current checkpoint, completed steps and structured failure. The default summary keeps focused evidence only; omitted data is not proof of absence, success or approval. Request detail=full only when focused evidence is insufficient or ambiguous; this does not rerun analysis. Select section=analysis, review, semantic, api (exact apiUrl), plan or run. Large documents return evidencePage JSON-text chunks: collect offset=0 then each nextOffset with the SAME documentId until nextOffset=null, join content in order and only then parse JSON. WORKFLOW_EVIDENCE_CHANGED means discard partial pages and restart the section at 0 without documentId. Never treat an individual partial page as complete evidence.', '/__desktop/workflow/get', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
-      detail: { type: 'string', enum: ['summary', 'full'], description: 'Evidence detail. Defaults to summary; full returns the persisted complete candidate set.' }
+      detail: { type: 'string', enum: ['summary', 'full'], description: 'Defaults to summary; full reads lossless persisted evidence, paged when large.' },
+      section: { type: 'string', enum: ['run', 'analysis', 'review', 'semantic', 'api', 'plan', 'reads'], description: 'Requires detail=full. reads returns the bounded optional reviewReads call list, not source approval or complete evidence. Other sections read persisted evidence. Defaults to run.' },
+      apiUrl: { type: 'string', description: 'Required only for section=api: exact API URL from the saved analysis.' },
+      offset: { type: 'number', description: 'Requires detail=full. First page 0; continuation must use the returned nextOffset and documentId.' },
+      documentId: { type: 'string', description: 'Exact SHA-256 from the first page, required for continuations. Restart on version mismatch.' }
     }, args => ({ runId: args.runId })],
-    ['business_retry_scenario_workflow', 'Retry only the current retryable failed step of a stateful scenario workflow. If target resolution reports E_TARGET_ROUTE_AMBIGUOUS, show the saved candidate routes to the user and ask them to choose. Only after the user explicitly selects one, pass selectedRoutePath and confirmedByUser=true; never guess a route. The selected route must be one of this run’s saved candidates. No Profile was written before this point, and the same run continues with source analysis after selection.', '/__desktop/workflow/retry', {
+    ['business_retry_scenario_workflow', 'Retry only the current retryable failed step of a stateful scenario workflow. If target resolution reports E_TARGET_ROUTE_AMBIGUOUS, immediately show the saved unordered candidate routes to the user and ask them to choose without preselecting or marking one Recommended. Do not search the repository or read source before this choice; source research cannot authorize a route selection. Only after the user explicitly selects one, pass selectedRoutePath and confirmedByUser=true; never guess a route. The selected route must be one of this run’s saved candidates. No Profile was written before this point, and the same run continues with source analysis after selection.', '/__desktop/workflow/retry', {
       runId: { type: 'string', required: true, description: 'Workflow run ID.' },
       selectedRoutePath: { type: 'string', description: 'Exact route selected by the user from the saved ambiguity candidates.' },
       confirmedByUser: { type: 'boolean', description: 'True only after the user explicitly confirms selectedRoutePath.' }
@@ -169,11 +170,13 @@ export async function apply(ctx) {
     }, args => ({ runId: args.runId })],
     ['business_context', 'Get the packaged business project, read-only source workspace, writable user Mock root, version, CodeIntell health and current preview state.', '/__desktop/context', {}, args => args],
     ['business_code_intell_status', 'Inspect CodeIntell index version, freshness, compatibility, coverage and the latest load error. Check this when source evidence is missing or scenario analysis fails.', '/__desktop/code-intell/status', {}, args => args],
-    ['business_analysis_mode', 'Read the current Mock scenario analysis mode and whether exact same-session analysis reuse is enabled. strict is the default evidence-first workflow. assisted may use same-build cache and real requests only to rank candidates; it still revalidates current CodeIntell/source and keeps every create/verify guard.', '/__desktop/analysis-mode', {}, args => args],
-    ['business_set_analysis_mode', 'Switch Mock scenario analysis between strict and assisted, and optionally enable or disable exact same-session analysis reuse. Set sessionReuse=false to force every request through a fresh analysis. Reuse is scoped to the same session/build/route/equivalent intent/API set and is invalidated by Mock mutations.', '/__desktop/analysis-mode/set', {
+    ['business_analysis_mode', 'Read the current Mock scenario analysis mode, exact same-session analysis reuse and exactScenarioEquivalence switch. strict is the default evidence-first workflow. assisted may use same-build cache and real requests only to rank candidates; it still revalidates current CodeIntell/source and keeps every create/verify guard. Exact Scenario equivalence compares current full configs within one API, ignoring only top-level id/label; original candidates and confirmation remain available.', '/__desktop/analysis-mode', {}, args => args],
+    ['business_set_analysis_mode', 'Switch Mock scenario analysis between strict and assisted, and optionally enable or disable exact same-session analysis reuse and exact Scenario grouping. Set sessionReuse=false to force every request through a fresh analysis. Set exactScenarioEquivalence=false to restore the original candidate-by-candidate ambiguity decision; no Profiles or Mock data change. Reuse is scoped to the same session/build/route/equivalent intent/API set and is invalidated by Mock mutations or analysis preference changes.', '/__desktop/analysis-mode/set', {
       mode: { type: 'string', required: true, enum: ['strict', 'assisted'], description: 'strict restores the default evidence-first workflow; assisted enables verified candidate acceleration.' },
-      sessionReuse: { type: 'boolean', description: 'Reuse an exact same-session analysis for up to five minutes. Defaults to true and can be disabled independently of mode.' }
-    }, args => ({ mode: args.mode, ...(args.sessionReuse === undefined ? {} : { sessionReuse: args.sessionReuse }) })],
+      sessionReuse: { type: 'boolean', description: 'Reuse an exact same-session analysis for up to five minutes. Defaults to true and can be disabled independently of mode.' },
+      exactScenarioEquivalence: { type: 'boolean', description: 'Group exact same-API configs for ambiguity checks, ignoring only top-level id/label. Defaults to true; false restores the old ambiguity decision independently of strict/assisted mode.' }
+    }, args => ({ mode: args.mode, ...(args.sessionReuse === undefined ? {} : { sessionReuse: args.sessionReuse }),
+      ...(args.exactScenarioEquivalence === undefined ? {} : { exactScenarioEquivalence: args.exactScenarioEquivalence }) })],
     ['business_clear_analysis_cache', 'Clear all optional Mock analysis candidate cache entries. This does not change Profiles, Mock data, conversations, CodeIntell artifacts or the selected analysis mode.', '/__desktop/analysis-cache/clear', {}, args => args],
     ['business_workflow_mode', 'Read whether scenario creation uses the default stateful workflow or the reversible legacy tool chain. This setting does not modify Profiles, scenarios or workflow history.', '/__desktop/workflow-mode', {}, args => args],
     ['business_set_workflow_mode', 'Switch scenario creation between workflow (default, recommended) and legacy compatibility mode. Use legacy only for controlled fallback; verification requirements remain unchanged.', '/__desktop/workflow-mode/set', {
@@ -191,6 +194,16 @@ export async function apply(ctx) {
       apiUrlsJson: { type: 'string', description: 'Optional JSON string array of exact API URLs already found in source evidence.' }
     }, args => ({ routePath: args.routePath, query: args.query, apiUrls: args.apiUrlsJson ? JSON.parse(args.apiUrlsJson) : [] })],
     ['business_list_profiles', 'List packaged and user-created business Mock Profiles and their API bindings. Use exact IDs when applying a scenario.', '/__desktop/profiles', {}, args => args],
+    ['business_inspect_source_evidence', 'Read-only source-location packet after workflow analysis. Use the current same-conversation evidenceId and 1-8 exact field/helper/enum identifiers from evidence, not business prose or guessed file paths. It reads fresh line-numbered ranges in a bounded neighborhood of the analyzed page, using existing CodeIntell IMPORT/CALL/CONST_REF relations. This is navigation evidence, NOT data-flow proof, current execution, API binding, source approval or final UI proof. Literal text can include comments; inspect it rather than equating same-name fields. Files are independent snapshots, not an atomic bundle. Missing/omitted matches never prove absence. Review related ranges together; use focused grep/read if the graph, token, scope or line budget cannot cover the question. Does not approve, create or apply a Profile, extend evidence expiry, or change analysis ranking.', '/__desktop/source/inspect-evidence', {
+      evidenceId: { type: 'string', required: true, description: 'Unexpired evidenceId from this conversation’s analyzed workflow target.' },
+      identifiersJson: { type: 'string', required: true, description: 'JSON array of 1-8 exact ASCII source identifiers, each at most 80 characters, e.g. ["statusLabel","loanId"]. No regex, file paths or prose.' }
+    }, args => ({ evidenceId: args.evidenceId, identifiers: JSON.parse(args.identifiersJson) })],
+    ['business_inspect_mock_scenario', 'Read-only focused inspection of one exact existing API/Scenario from the current user Overlay or project source. Use this when the analysis value preview lacks required fields, before line-number searches or large mock.json reads. Request only fields needed for the stated business requirement, not every auxiliary field merely to prove full-source cloning. Never send more than 16 paths in one call. If recovery.action is retry-same-source-in-batches, split the same requested paths into batches of at most 16 without dropping any; do not switch to full-file inspection solely for this count error. Separate batches are separate file snapshots, not a combined atomic proof. fieldPathsJson is a JSON array of typed paths relative to Scenario.data, e.g. [["data","list",0,"loan_acct_no"],["data","list",0,"duestatus"]]. Omit it to discover the root shape, then request narrow paths. Each present field either has its complete value or an explicitly shape-only summary; never treat complete=false as partial data to create a Mock. No baseData merge, default-Scenario fallback, or fallback to a lower source layer occurs. Source IDs must come from evidence, not spelling guesses. This read is not creation evidence, source approval or final UI proof. For reviewed reuse pass sourceScenarioId so the Runtime clones the complete original configuration; do not reconstruct or sanitize it from this projection. If the tool is unavailable, fails or does not cover a special field, retain exact Scenario/source search and focused line-range inspection; do not relax any workflow gate.', '/__desktop/mock/inspect-scenario', {
+      apiUrl: { type: 'string', required: true, description: 'Exact canonical two-segment API URL already found in source evidence.' },
+      scenarioId: { type: 'string', required: true, description: 'Exact existing Scenario ID from analysis, never a label approximation.' },
+      fieldPathsJson: { type: 'string', description: 'Optional JSON array of 1-16 typed field paths (string object keys, integer array indices), depth 0-12, relative to Scenario.data. Omit for its root shape.' }
+    }, args => ({ apiUrl: args.apiUrl, scenarioId: args.scenarioId,
+      ...(args.fieldPathsJson === undefined ? {} : { fieldPaths: JSON.parse(args.fieldPathsJson) }) })],
     ['business_preview_evidence', 'Read up to 100 recent Mock requests from the preview, including the actually matched Profile and scenario IDs. Use this after applying a Profile; request evidence still does not prove the final rendered UI state.', '/__desktop/evidence', {}, args => args],
     ['business_scenario_result', 'Explain the current scenario as four separate stages: created, applied, real API/Scenario hit, and page verification. Includes CodeIntell creation evidence when available, API bindings and field drivers, real requests, route/UI checks, and a precise failure category. Use this instead of describing a created or applied Profile as successfully verified.', '/__desktop/result', {}, args => args],
     ['business_verify_preview', 'Legacy compatibility verification, disabled while the default workflow mode is active. Prefer the workflow verification step; enable legacy mode explicitly only for controlled recovery. It verifies the current Profile, actual API scenario hits, current iframe observation, route and visible-text assertions. A 422 response or null pageObservation means the rendered result is NOT verified.', '/__desktop/verify', {
@@ -212,23 +225,47 @@ export async function apply(ctx) {
     }, args => args]
   ]
   for (const [name, description, route, parameters, body] of specs) {
-    ctx.tools.register(defineTool({ name, description, parameters,
+    const toolDescription = ['business_start_scenario_workflow', 'business_resume_scenario_workflow'].includes(name)
+      ? `${description} When value previews lack required Mock fields, first use business_inspect_mock_scenario for the evidence-backed exact API/Scenario and typed paths; retain focused source/line-range inspection as fallback. Shape-only projections are not complete Mock configurations. Preserve the original full source Scenario when reusing, without unrequested field cleanup. Inspect context.intentResolution separately from the preserved context.query: only plugin-declared exact or opted-in leading-clause intent matching activates semanticExpectations. Unmatched requests still require review; multiple declared intent clauses stop the run. Never rewrite the request to bypass an ambiguous, changed or unmatched intent. Matching does not approve a source, erase additional constraints, or prove the requested object and state appear on the same card. Prefer business_propose_scenario_plan to present the reviewed full plan in the Workflows panel before approval. Proposal submission is not user confirmation; never automatically resume it. Legacy conversation-based confirmation remains available with explicit human approval.`
+      : description
+    const preparationHint = name === 'business_inspect_mock_scenario'
+      ? ' When paths are known, batch required scalar and evidence-backed response-status paths in the FIRST business_inspect_mock_scenario call, within 16 paths. Root-shape discovery is only for unknown structure; no automatic envelope paths or success inference.'
+      : name === 'business_propose_scenario_plan'
+        ? ' After focused review, opt into format=source-reuse-v1 to serialize explicit bindings and ordered checks without inventing mechanical IDs. It never selects a source or adopts suggestedPlan. Use the original full format for custom IDs, data changes or unsupported fields. Preserve every requested assertion; neither a successful API envelope nor source inspection proves the final page. Keep the final receipt brief and describe unverified stages, not internal deliberation.'
+        : ['business_start_scenario_workflow', 'business_resume_scenario_workflow'].includes(name)
+          ? ' Batch known required scalar and response-status paths on the first Mock inspection, within its budget. For reviewed full-source reuse, the proposal tool supports source-reuse-v1; do not reconstruct or repeatedly narrate the full plan before submission. Keep user-facing updates brief and separate source evidence, API success and final page verification. All review and confirmation gates remain.' : ''
+    const sourceReviewHint = ['business_start_scenario_workflow', 'business_resume_scenario_workflow'].includes(name)
+      ? ' For field transformation or card-rendering source review, first use business_inspect_source_evidence with this analysis evidenceId and a few exact evidence-backed identifiers. Inspect its related line ranges together; these are location hints, not proven data-flow. Retain focused grep/read for missing, stale, unsupported or ambiguous evidence and never relax confirmation or final page gates.' : ''
+    const readHint = ['business_start_scenario_workflow', 'business_retry_scenario_workflow', 'business_resume_scenario_workflow', 'business_scenario_workflow_status'].includes(name)
+      ? ' Use returned reviewReads for optional exact tool arguments when focused Mock/source review is necessary; section=reads recovers this bounded list if omitted. Calls are not a source selection or mandatory extra work. Conflicts must remain visible; do not repeat values already sufficient in current evidence or infer undeclared paths. A partial API page is not complete evidence: prefer focused reads for exact values, or finish all pinned pages if the full document is genuinely needed. Keep focused grep/read for named gaps and all confirmation/UI gates.' : ''
+    ctx.tools.register(defineTool({ name, description: toolDescription + sourceReviewHint + preparationHint + readHint, parameters,
       output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
       async execute(args, exec) {
         const value = await connection()
         await registerWorkspace(value)
-        const writes = new Set(['/__desktop/open-preview', '/__desktop/analyze-target', '/__desktop/analysis-mode/set', '/__desktop/analysis-cache/clear', '/__desktop/workflow-mode/set', '/__desktop/apply', '/__desktop/verify', '/__desktop/create-profile', '/__desktop/rollback', '/__desktop/user-data/import', '/__desktop/workflow/start-scenario', '/__desktop/workflow/resume', '/__desktop/workflow/get', '/__desktop/workflow/retry', '/__desktop/workflow/cancel'])
+        // These routes use POST payloads; the inspection route is read-only.
+        const postRoutes = new Set(['/__desktop/source/inspect-evidence', '/__desktop/mock/inspect-scenario', '/__desktop/open-preview', '/__desktop/analyze-target', '/__desktop/analysis-mode/set', '/__desktop/analysis-cache/clear', '/__desktop/workflow-mode/set', '/__desktop/apply', '/__desktop/verify', '/__desktop/create-profile', '/__desktop/rollback', '/__desktop/user-data/import', '/__desktop/workflow/start-scenario', '/__desktop/workflow/propose-plan', '/__desktop/workflow/resume', '/__desktop/workflow/get', '/__desktop/workflow/retry', '/__desktop/workflow/cancel'])
+        const promptTimes = route === '/__desktop/workflow/start-scenario' ? promptTiming.timestamps(exec.agent?.session) : undefined
         const response = await fetch(`${value.origin}${route}`, {
-          method: writes.has(route) ? 'POST' : 'GET',
+          method: postRoutes.has(route) ? 'POST' : 'GET',
           headers: { Authorization: `Bearer ${value.token}`, 'Content-Type': 'application/json',
             ...(exec.agent?.id ? { 'X-DSH-Session': exec.agent.id } : {}) },
-          body: writes.has(route) ? JSON.stringify(body(args)) : undefined,
+          body: postRoutes.has(route) ? JSON.stringify({ ...body(args), ...promptTimes }) : undefined,
           signal: exec.signal
         })
         const text = await response.text()
         if (!response.ok) throw new Error(`Business service ${response.status}: ${text}`)
-        if (WORKFLOW_ROUTES.has(route) && !(name === 'business_scenario_workflow_status' && args.detail === 'full')) {
-          try { return JSON.stringify(compactBusinessWorkflowRun(JSON.parse(text))) } catch { return text }
+        if (WORKFLOW_ROUTES.has(route)) {
+          let payload
+          try { payload = JSON.parse(text) } catch {
+            throw new Error('Business workflow returned invalid JSON; no raw response was returned. The operation may have completed; read workflow status before retrying any mutation.')
+          }
+          return serializeBusinessWorkflowReply(payload, {
+            ...(name === 'business_scenario_workflow_status' ? {
+              detail: args.detail, section: args.section, apiUrl: args.apiUrl, offset: args.offset, documentId: args.documentId
+            } : {}),
+            proposalOnly: name === 'business_propose_scenario_plan'
+          })
         }
         return text
       }

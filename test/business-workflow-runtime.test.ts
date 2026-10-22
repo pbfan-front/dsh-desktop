@@ -27,6 +27,40 @@ function persisted<T>(value: T): T {
 }
 
 describe('business workflow runtime', () => {
+  it('persists partial checkpoint progress and rejects concurrent resumes or cancellation during validation', async () => {
+    const subject = runtime()
+    let release: () => void = () => {}
+    let entered: () => void = () => {}
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    let validations = 0
+    subject.registerWorkflow(definition, {
+      'capture-page': () => ({}), 'infer-chain': () => ({}), 'apply-mock': () => ({ output: 'finished' })
+    }, {}, { checkpointValidators: {
+      'confirm-plan': async () => {
+        validations++
+        if (validations === 1) {
+          entered()
+          await blocked
+          return { contextPatch: { pageChecks: ['first'] }, continueWaiting: true }
+        }
+      }
+    } })
+    const waiting = await subject.start({ workflowId: definition.id, pluginId: 'com.dataelement.demo-test' })
+    const first = subject.resume(waiting.id, { stepId: 'first' })
+    await started
+    await expect(subject.resume(waiting.id, { stepId: 'second' })).rejects.toThrow('already executing')
+    await expect(subject.cancel(waiting.id)).rejects.toThrow('currently executing')
+    release()
+    const partial = await first
+    expect(partial.status).toBe('waiting_for_user')
+    expect(partial.context.pageChecks).toEqual(['first'])
+    expect(partial.steps[2]?.completedAt).toBeUndefined()
+    expect(partial.steps[2]?.output).toBeUndefined()
+    expect((await subject.resume(partial.id, { stepId: 'second' })).status).toBe('completed')
+    expect(validations).toBe(2)
+  })
+
   it('runs deterministic and agent steps in order, then pauses at a checkpoint', async () => {
     const events: string[] = []
     const subject = runtime()

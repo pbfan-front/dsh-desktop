@@ -2,7 +2,7 @@ import { fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { resolve } from 'node:path'
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 
 const token = randomBytes(32).toString('hex')
@@ -65,11 +65,20 @@ try {
   assert.deepEqual(await workflowBridgeResponse.json(), {
     action: 'start-scenario', payload: { routePath: '/credit/productCombine', query: '核额失败', sessionId: 'workflow-test' }
   })
+  assert.equal((await get('/__desktop/workflow/propose-plan', { method: 'POST', body: '{}' })).status, 401)
+  const proposalBridgeResponse = await get('/__desktop/workflow/propose-plan', { method: 'POST',
+    headers: { ...headers, 'X-DSH-Session': 'proposal-session' }, body: JSON.stringify({ runId: 'run-plan', sessionId: 'forged-session', plan: { label: 'review only' } }) })
+  assert.deepEqual(await proposalBridgeResponse.json(), { action: 'propose-plan', payload: {
+    runId: 'run-plan', sessionId: 'proposal-session', plan: { label: 'review only' }
+  } })
+  assert.equal((await get('/__desktop/workflow/approve-proposal', { method: 'POST', headers, body: '{}' })).status, 404)
   assert.equal((await get('/__desktop/profiles')).status, 401)
   assert.equal((await get('/__desktop/state', { headers: { Origin: 'https://example.com' } })).status, 403)
   assert.equal((await get('/api/agent/mock', { method: 'POST' })).status, 403)
   const context = await (await get('/__desktop/context', { headers })).json()
   assert.ok(context.sourceRoot.startsWith(resolve('build/business-package')))
+  assert.equal(new URL(context.state.url).searchParams.get('__dshRevision'), String(context.state.revision))
+  assert.equal(new URL(context.state.url).searchParams.get('__dshRevisionId'), context.state.revisionId)
   assert.equal(context.userData.schemaVersion, 2)
   assert.equal(context.userData.migrated, true)
   assert.match(context.userData.operationId, /^[0-9a-f-]{36}$/)
@@ -78,6 +87,51 @@ try {
   assert.ok(context.codeIntell.coverage.routes > 0)
   const codeIntellStatus = await (await get('/__desktop/code-intell/status', { headers })).json()
   assert.equal(codeIntellStatus.state, 'ready', JSON.stringify(codeIntellStatus))
+  const inspectionPath = '/__desktop/mock/inspect-scenario'
+  const inspectionInput = { apiUrl: '/loanNbr/loanNbr.json', scenarioId: '正常借据可以提前结清',
+    fieldPaths: [['data', 'list', 0, 'loan_acct_no'], ['data', 'list', 0, 'duestatus']] }
+  assert.equal((await get(inspectionPath, { method: 'POST', body: JSON.stringify(inspectionInput) })).status, 401)
+  assert.equal((await get(inspectionPath, { method: 'POST', headers: { Origin: ready.origin, 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(inspectionInput) })).status, 401)
+  assert.equal((await get(inspectionPath, { method: 'POST', headers, body: '{bad-json' })).status, 422)
+  assert.equal((await get(inspectionPath, { method: 'POST', headers, body: ' '.repeat(32769) })).status, 413)
+  const overLimitInspection = await get(inspectionPath, { method: 'POST', headers, body: JSON.stringify({ ...inspectionInput,
+    fieldPaths: Array.from({ length: 17 }, () => ['data', 'list', 0, 'duestatus']) }) })
+  assert.equal(overLimitInspection.status, 422)
+  assert.deepEqual((await overLimitInspection.json()).recovery, { action: 'retry-same-source-in-batches', maxPaths: 16,
+    receivedPaths: 17, requiredBatches: 2, preserveAllPaths: true })
+  for (const input of [{ ...inspectionInput, apiUrl: '/a/../private.json' },
+    { ...inspectionInput, fieldPaths: [['constructor']] }]) {
+    assert.equal((await get(inspectionPath, { method: 'POST', headers, body: JSON.stringify(input) })).status, 422)
+  }
+  const profileBeforeInspection = await readFile(resolve(legacyProfileDir, 'mock-profiles.json'), 'utf8')
+  const stateBeforeInspection = await (await get('/__desktop/state', { headers })).json()
+  const inspectionResponse = await get(inspectionPath, { method: 'POST', headers, body: JSON.stringify(inspectionInput) })
+  const inspectionText = await inspectionResponse.text()
+  const inspected = JSON.parse(inspectionText)
+  assert.equal(inspectionResponse.status, 200, inspectionText)
+  assert.equal(inspected.source.layer, 'project-source')
+  assert.equal(inspected.fullScenario, false)
+  assert.equal(inspected.scope, 'scenario.data-only')
+  const receiptConfig = JSON.parse(await readFile(resolve(packageSourceRoot, 'src/baseTypes/api/loanNbr/loanNbr/mock.json'), 'utf8'))
+  const receiptSources = Array.isArray(receiptConfig.scenarios) ? receiptConfig.scenarios
+    : Object.entries(receiptConfig.scenarios).map(([id, value]) => ({ ...value, id }))
+  const normalReceiptSource = receiptSources.find(item => item.id === inspectionInput.scenarioId)
+  assert.deepEqual(inspected.fields.map(item => item.value), [normalReceiptSource.data.data.list[0].loan_acct_no, '0'])
+  assert.ok(inspected.fields.every(item => item.complete === true))
+  assert.ok(Buffer.byteLength(inspectionText) < 65536)
+  assert.equal(inspected.evidenceId, undefined)
+  const overlayInspection = await (await get(inspectionPath, { method: 'POST', headers, body: JSON.stringify({
+    apiUrl: '/refactor/queryMultiEnterpriseListII.json', scenarioId: 'legacy_scenario', fieldPaths: [['data', 'array']]
+  }) })).json()
+  assert.equal(overlayInspection.source.layer, 'user-overlay')
+  assert.deepEqual(overlayInspection.fields[0].value, [])
+  const shapeInspection = await (await get(inspectionPath, { method: 'POST', headers, body: JSON.stringify({
+    apiUrl: inspectionInput.apiUrl, scenarioId: inspectionInput.scenarioId
+  }) })).json()
+  assert.equal(shapeInspection.fields[0].reason, 'shape-only')
+  assert.equal(shapeInspection.fields[0].value, undefined)
+  assert.equal(await readFile(resolve(legacyProfileDir, 'mock-profiles.json'), 'utf8'), profileBeforeInspection)
+  assert.deepEqual(await (await get('/__desktop/state', { headers })).json(), stateBeforeInspection)
   const explicitTargetResponse = await get('/__desktop/resolve-target', {
     method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '创建正常借据场景' })
   })
@@ -98,6 +152,7 @@ try {
   const ambiguousTarget = await ambiguousTargetResponse.json()
   assert.equal(ambiguousTargetResponse.status, 422)
   assert.equal(ambiguousTarget.code, 'E_TARGET_ROUTE_AMBIGUOUS')
+  assert.match(ambiguousTarget.error, /Candidate order is arbitrary; none is recommended or preselected/)
   assert.ok(ambiguousTarget.candidates.some(candidate => candidate.routePath === '/repay/receiptList'))
   assert.ok(ambiguousTarget.candidates.every(candidate => candidate.routePath.startsWith('/')))
   const missingTargetResponse = await get('/__desktop/resolve-target', {
@@ -108,6 +163,7 @@ try {
   const defaultAnalysisMode = await (await get('/__desktop/analysis-mode', { headers })).json()
   assert.equal(defaultAnalysisMode.mode, 'strict')
   assert.equal(defaultAnalysisMode.sessionReuse, true)
+  assert.equal(defaultAnalysisMode.exactScenarioEquivalence, true)
   assert.equal(defaultAnalysisMode.cacheEntries, 0)
   const assistedModeResponse = await get('/__desktop/analysis-mode/set', {
     method: 'POST', headers, body: JSON.stringify({ mode: 'assisted' })
@@ -156,6 +212,12 @@ try {
   assert.equal(receiptAnalysis.analysisPlan.reviewPacket.autoReuseEligibility.uniqueConfidentMatch, false)
   assert.equal(receiptAnalysis.analysisPlan.reviewPacket.reason[0].code, 'intent-match-not-confident')
   assert.equal(receiptAnalysis.analysisPlan.reviewPacket.candidates[0].apiUrl, '/loanNbr/loanNbr.json')
+  const valuePreview = receiptAnalysis.analysisPlan.reviewPacket.candidates[0].valuePreview
+  assert.equal(valuePreview.source, 'current-mock-config-scenario-data')
+  assert.ok(valuePreview.returnedFieldCount <= 96)
+  assert.equal(valuePreview.returnedFieldCount, valuePreview.fields.length)
+  assert.ok(valuePreview.fields.some(field => field.path === 'list[].duestatus'))
+  assert.ok(valuePreview.fields.every(field => !('value' in field) || typeof field.value !== 'string' || field.value.length <= 64))
   assert.equal(Object.values(receiptAnalysis.analysisPlan.reviewPacket.candidates[0].rankingBreakdown).reduce((a, b) => a + b, 0),
     receiptAnalysis.analysisPlan.reviewPacket.candidates[0].rankingScore)
   assert.ok(receiptAnalysis.analysisPlan.reviewPacket.candidates[0].fieldImpact.consumedFields.includes('list[].duestatus'))
@@ -164,6 +226,95 @@ try {
   assert.ok(receiptAnalysis.analysisPlan.reviewPacket.candidates[0].fieldImpact.sourceEvidence.length > 0)
   assert.equal(receiptAnalysis.analysisPlan.suggestedPlan, undefined)
   assert.equal(receiptAnalysis.analysisPlan.repositorySearch, 'only-if-focus-candidates-are-insufficient')
+  const prepayAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers,
+    body: JSON.stringify({ routePath: '/repay/receiptList', query: '微业贷借据列表：一笔正常状态的借据可以提前结清（还款/结清完成）的体验状态' }) })
+  const prepayAnalysis = await prepayAnalysisResponse.json()
+  assert.equal(prepayAnalysisResponse.status, 200, JSON.stringify(prepayAnalysis).slice(0, 4000))
+  const prepayCandidate = prepayAnalysis.analysisPlan.reviewPacket.candidates[0]
+  assert.equal(prepayCandidate.scenarioId, '正常借据可以提前结清')
+  const prepayValues = Object.fromEntries(prepayCandidate.valuePreview.fields.map(field => [field.path, field.value]))
+  assert.equal(prepayValues['list[].duestatus'], '0')
+  assert.equal(prepayValues['list[].isprepay'], '1')
+  assert.equal(prepayValues['list[].unSettleStatus'], 'Y')
+  assert.equal(prepayValues['list[].supportPartRepay'], 'N')
+  const readyPrepayResponse = await get('/__desktop/analyze-target', { method: 'POST', headers,
+    body: JSON.stringify({ routePath: '/repay/receiptList',
+      query: '微业贷借据列表：一笔正常借据可以提前结清（正常还款中的借据展示“提前结清”入口并可发起提前结清）' }) })
+  const readyPrepayAnalysis = await readyPrepayResponse.json()
+  assert.equal(readyPrepayResponse.status, 200, JSON.stringify(readyPrepayAnalysis).slice(0, 4000))
+  assert.equal(readyPrepayAnalysis.analysisPlan.qualityGate.level, 'ready')
+  assert.equal(readyPrepayAnalysis.analysisPlan.reviewPacket, undefined)
+  assert.equal(readyPrepayAnalysis.analysisPlan.leadingScenarioValuePreview.apiUrl, '/loanNbr/loanNbr.json')
+  assert.equal(readyPrepayAnalysis.analysisPlan.leadingScenarioValuePreview.scenarioId, '正常借据可以提前结清')
+  const readyPrepayPreview = readyPrepayAnalysis.analysisPlan.leadingScenarioValuePreview.valuePreview
+  assert.ok(readyPrepayPreview.returnedFieldCount <= 96)
+  assert.equal(Object.fromEntries(readyPrepayPreview.fields.map(field => [field.path, field.value]))['list[].duestatus'], '0')
+  const equivalenceMockFile = resolve(userRoot, 'src/baseTypes/api/loanNbr/loanNbr/mock.json')
+  const equivalenceSourceConfig = JSON.parse(await readFile(resolve(packageSourceRoot, 'src/baseTypes/api/loanNbr/loanNbr/mock.json'), 'utf8'))
+  const equivalenceSource = equivalenceSourceConfig.scenarios.find(item => item.id === '正常借据可以提前结清')
+  assert.ok(equivalenceSource)
+  const exactCopy = id => ({ ...structuredClone(equivalenceSource), id })
+  const writeEquivalenceFixture = async scenarios => {
+    await mkdir(resolve(equivalenceMockFile, '..'), { recursive: true })
+    await writeFile(equivalenceMockFile, JSON.stringify({ ...equivalenceSourceConfig, scenarios }))
+  }
+  const analyzeEquivalent = async () => {
+    const response = await get('/__desktop/analyze-target', { method: 'POST', headers,
+      body: JSON.stringify({ routePath: '/repay/receiptList',
+        query: '微业贷借据列表：一笔正常借据可以提前结清（正常还款中的借据展示“提前结清”入口并可发起提前结清）' }) })
+    const result = await response.json()
+    assert.equal(response.status, 200, JSON.stringify(result).slice(0, 1000))
+    return result
+  }
+  const setEquivalence = async enabled => {
+    const response = await get('/__desktop/analysis-mode/set', { method: 'POST', headers,
+      body: JSON.stringify({ mode: 'assisted', exactScenarioEquivalence: enabled }) })
+    assert.equal(response.status, 200)
+    return response.json()
+  }
+  await writeEquivalenceFixture([equivalenceSource, exactCopy('same_copy_a'), exactCopy('same_copy_b')])
+  const duplicateAnalysis = await analyzeEquivalent()
+  assert.equal(duplicateAnalysis.analysisReuse.reused, false, 'A new Overlay invalidates the existing analysis')
+  assert.equal(duplicateAnalysis.analysisPlan.qualityGate.level, 'ready')
+  assert.equal(duplicateAnalysis.analysisPlan.scenarioEquivalence.equivalentCandidateCount, 2)
+  assert.deepEqual(duplicateAnalysis.analysisPlan.scenarioEquivalence.groups[0].scenarioIds,
+    ['正常借据可以提前结清', 'same_copy_a', 'same_copy_b'])
+  assert.ok(duplicateAnalysis.analysisPlan.existingScenarioMatches.some(item => item.scenarioId === 'same_copy_b'),
+    'Original ranked candidates must remain available for audit')
+  assert.equal(duplicateAnalysis.analysisPlan.suggestedPlan.requiresConfirmation, true)
+  assert.equal((await setEquivalence(false)).exactScenarioEquivalence, false)
+  const ungroupedAnalysis = await analyzeEquivalent()
+  assert.equal(ungroupedAnalysis.analysisReuse.reused, false, 'Preference changes must invalidate analysis reuse')
+  assert.equal(ungroupedAnalysis.analysisPlan.qualityGate.level, 'review')
+  assert.ok(ungroupedAnalysis.analysisPlan.qualityGate.gaps.includes('existing-scenario-match-ambiguous'))
+  assert.equal(ungroupedAnalysis.analysisPlan.scenarioEquivalence.equivalentCandidateCount, 0)
+  assert.equal((await setEquivalence(true)).exactScenarioEquivalence, true)
+  const changedCopy = exactCopy('changed_state')
+  changedCopy.data.data.list[0].duestatus = '1'
+  await writeEquivalenceFixture([equivalenceSource, exactCopy('same_copy_a'), changedCopy])
+  const differentStateAnalysis = await analyzeEquivalent()
+  assert.equal(differentStateAnalysis.analysisReuse.reused, false)
+  assert.equal(differentStateAnalysis.analysisPlan.qualityGate.level, 'review')
+  assert.equal(differentStateAnalysis.analysisPlan.scenarioEquivalence.equivalentCandidateCount, 1)
+  assert.ok(differentStateAnalysis.analysisPlan.reviewPacket.candidates.some(item => item.scenarioId === 'changed_state'))
+  await writeEquivalenceFixture([equivalenceSource, exactCopy('same_copy_a'), { ...exactCopy('different_response'), responseType: 'blob' }])
+  const differentResponseAnalysis = await analyzeEquivalent()
+  assert.equal(differentResponseAnalysis.analysisPlan.qualityGate.level, 'review')
+  assert.ok(differentResponseAnalysis.analysisPlan.reviewPacket.candidates.some(item => item.scenarioId === 'different_response'))
+  await writeEquivalenceFixture([equivalenceSource,
+    ...Array.from({ length: 13 }, (_, index) => exactCopy(`clone_${index}`)), changedCopy])
+  const tailAlternativeAnalysis = await analyzeEquivalent()
+  assert.equal(tailAlternativeAnalysis.analysisPlan.existingScenarioMatches.length, 12)
+  assert.equal(tailAlternativeAnalysis.analysisPlan.qualityGate.level, 'review', 'A different state beyond the display limit must still block uniqueness')
+  assert.ok(tailAlternativeAnalysis.analysisPlan.reviewPacket.candidates.some(item => item.scenarioId === 'changed_state'))
+  await writeEquivalenceFixture([equivalenceSource, ...Array.from({ length: 51 }, (_, index) => exactCopy(`large_${index}`))])
+  const truncatedEquivalenceAnalysis = await analyzeEquivalent()
+  assert.equal(truncatedEquivalenceAnalysis.analysisPlan.qualityGate.level, 'review', 'Truncated source windows cannot prove unique state')
+  assert.ok(truncatedEquivalenceAnalysis.analysisPlan.scenarioEquivalence.ungroupableCount >= 50)
+  assert.equal((await get('/__desktop/analysis-mode/set', { method: 'POST', headers,
+    body: JSON.stringify({ mode: 'assisted', exactScenarioEquivalence: 'false' }) })).status, 422)
+  await unlink(equivalenceMockFile)
+  assert.equal((await analyzeEquivalent()).analysisPlan.qualityGate.level, 'ready')
   const semanticRule = { id: 'receipt-normal-status', routePath: '/repay/receiptList',
     intentEquals: '借据列表正常展示', apiUrl: '/loanNbr/loanNbr.json',
     fieldAssertions: [{ path: ['data', 'list', 0, 'duestatus'], equals: '0' }],
@@ -171,6 +322,29 @@ try {
   const semanticRequest = rule => get('/__desktop/analyze-target', { method: 'POST', headers,
     body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据列表正常展示', semanticExpectations: [rule] }) })
   const semanticAnalysis = await (await semanticRequest(semanticRule)).json()
+  const clauseRule = { ...semanticRule, intentMatch: 'leading-clause' }
+  const clauseQuery = '借据列表正常展示：保持默认分支，不执行交易。'
+  const clauseAnalysisResponse = await get('/__desktop/analyze-target', { method: 'POST', headers,
+    body: JSON.stringify({ routePath: clauseRule.routePath, query: clauseQuery, semanticExpectations: [clauseRule] }) })
+  assert.equal(clauseAnalysisResponse.status, 200)
+  const clauseAnalysis = await clauseAnalysisResponse.json()
+  assert.equal(clauseAnalysis.query, clauseQuery, 'The full request must survive cross-process validation')
+  assert.equal(clauseAnalysis.analysisPlan.semanticValueChecks.approvedSources.find(item => item.scenarioId === '正常借据可以提前结清').status, 'matched')
+  assert.equal((await get('/__desktop/analyze-target', { method: 'POST', headers,
+    body: JSON.stringify({ routePath: clauseRule.routePath, query: clauseQuery, semanticExpectations: [semanticRule] }) })).status, 422,
+  'No declared opt-in means the original exact-query contract')
+  const clauseSource = { routePath: clauseRule.routePath, query: clauseQuery, semanticExpectations: [clauseRule],
+    scenarios: [{ apiUrl: clauseRule.apiUrl, sourceScenarioId: '正常借据可以提前结清' }] }
+  assert.equal((await get('/__desktop/validate-semantic-source', { method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify(clauseSource) })).status, 200)
+  const clauseCreate = await get('/__desktop/create-profile', { method: 'POST', headers: workflowHeaders,
+    body: JSON.stringify({ evidenceId: clauseAnalysis.evidenceId, query: clauseQuery, semanticExpectations: [clauseRule],
+      profile: { id: 'clause_contract_test', label: 'Clause contract test', page: 'repay', routePath: clauseRule.routePath },
+      scenarios: [{ id: 'clause_normal_test', apiUrl: clauseRule.apiUrl, sourceScenarioId: '正常借据可以提前结清' }] }) })
+  assert.equal(clauseCreate.status, 201)
+  const clauseCreated = await clauseCreate.json()
+  assert.equal((await get('/__desktop/rollback', { method: 'POST', headers,
+    body: JSON.stringify({ operationId: clauseCreated.operationId }) })).status, 200)
   assert.equal(semanticAnalysis.analysisReuse.enabled, false)
   const sourceCheck = semanticAnalysis.analysisPlan.semanticValueChecks.candidates.find(item => item.scenarioId === '正常借据可以提前结清')
   assert.equal(sourceCheck.status, 'matched')
@@ -229,6 +403,9 @@ try {
   assert.equal(receiptAnalysis.acceleration.sourceRevalidated, true)
   assert.equal(receiptAnalysis.analysisReuse.reused, false)
   assert.equal(receiptAnalysis.analysisTimings.reused, false)
+  const currentReceiptAnalysis = await (await get('/__desktop/analyze-target', {
+    method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
+  })).json()
   const reusedReceiptAnalysis = await (await get('/__desktop/analyze-target', {
     method: 'POST', headers, body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
   })).json()
@@ -237,7 +414,7 @@ try {
   assert.ok(reusedReceiptAnalysis.analysisTimings.totalMs >= 0)
   assert.equal(reusedReceiptAnalysis.analysisReuse.scope, 'same-session-exact-input')
   assert.notEqual(reusedReceiptAnalysis.evidenceId, receiptAnalysis.evidenceId)
-  assert.deepEqual(reusedReceiptAnalysis.analysisPlan, receiptAnalysis.analysisPlan)
+  assert.deepEqual(reusedReceiptAnalysis.analysisPlan, currentReceiptAnalysis.analysisPlan)
   const otherSessionReceiptAnalysis = await (await get('/__desktop/analyze-target', {
     method: 'POST', headers: { ...headers, 'X-DSH-Session': 'analysis-other-session' },
     body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
@@ -595,6 +772,112 @@ try {
   assert.equal(scenarioResult.stages.requestHit.passed, true)
   assert.equal(scenarioResult.stages.verified.passed, true)
   assert.ok(scenarioResult.apiBindings.some(item => item.apiUrl === '/refactor/queryMultiEnterpriseListII.json' && item.hit))
+  assert.equal((await get('/__desktop/default-ui', { method: 'POST', headers: {
+    Origin: ready.origin, 'Sec-Fetch-Site': 'same-origin' } })).status, 200)
+  const reappliedResponse = await get('/__desktop/apply', { method: 'POST', headers,
+    body: JSON.stringify({ profileId: 'p1_user_test' }) })
+  assert.equal(reappliedResponse.status, 200)
+  const reappliedState = await reappliedResponse.json()
+  const reappliedUrl = new URL(reappliedState.url)
+  assert.equal(reappliedUrl.searchParams.get('__dshRevision'), String(reappliedState.revision))
+  assert.equal(reappliedUrl.searchParams.get('__dshRevisionId'), reappliedState.revisionId)
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date(Date.parse(reappliedState.revisionStartedAt) - 1000).toISOString(),
+    sessionId: 'default', revision: reappliedState.revision, revisionId: reappliedState.revisionId,
+    profileId: 'p1_user_test', scenarioId: 'p1_normal',
+    path: '/refactor/queryMultiEnterpriseListII.json', status: 200
+  })}\n`)
+  const observeAgain = route => get('/__desktop/page-observation-ui', { method: 'POST',
+    headers: { Origin: ready.origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ route, title: '额度页', text: '预估可借金额 P1 正常状态' }) })
+  const verifyAgain = () => get('/__desktop/verify', { method: 'POST', headers,
+    body: JSON.stringify({ route: '/credit/productCombine', containsText: ['P1'], absentText: ['系统繁忙'] }) })
+  assert.equal((await observeAgain('/mm2606290/#/credit/productCombine')).status, 202)
+  const staleRequestVerification = await verifyAgain()
+  assert.equal(staleRequestVerification.status, 422, 'Re-selecting a Profile must not reuse its earlier request hit')
+  assert.equal((await staleRequestVerification.json()).checks.scenarios[0].passed, false)
+  assert.equal((await get('/__desktop/verify', { method: 'POST', headers,
+    body: JSON.stringify({ containsText: ['P1'], absentText: [] }) })).status, 422,
+    'A missing route must never pass preview verification')
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date().toISOString(), sessionId: 'default', profileId: 'p1_user_test',
+    scenarioId: 'p1_normal', path: '/refactor/queryMultiEnterpriseListII.json', status: 200
+  })}\n`)
+  assert.equal((await verifyAgain()).status, 422, 'Untagged legacy evidence must not verify a new preview')
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date().toISOString(), sessionId: 'default', revision: reappliedState.revision - 1,
+    revisionId: reappliedState.revisionId, profileId: 'p1_user_test', scenarioId: 'p1_normal',
+    path: '/refactor/queryMultiEnterpriseListII.json', status: 200
+  })}\n`)
+  assert.equal((await verifyAgain()).status, 422, 'A late request from an older revision must not count')
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date().toISOString(), sessionId: 'default', revision: reappliedState.revision,
+    revisionId: '00000000-0000-0000-0000-000000000000', profileId: 'p1_user_test', scenarioId: 'p1_normal',
+    path: '/refactor/queryMultiEnterpriseListII.json', status: 200
+  })}\n`)
+  assert.equal((await verifyAgain()).status, 422, 'A stale preview instance with the same revision must not count')
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date().toISOString(), sessionId: 'default', revision: reappliedState.revision,
+    revisionId: reappliedState.revisionId, profileId: 'p1_user_test',
+    scenarioId: 'p1_normal', path: '/other/unrelated.json', status: 200
+  })}\n`)
+  const wrongApiVerification = await verifyAgain()
+  assert.equal(wrongApiVerification.status, 422, 'A matching Scenario ID from another API must not count')
+  assert.equal((await wrongApiVerification.json()).checks.scenarios[0].passed, false)
+  await appendFile(resolve(userRoot, '.runtime-evidence.jsonl'), `${JSON.stringify({
+    timestamp: new Date().toISOString(), sessionId: 'default', revision: reappliedState.revision,
+    revisionId: reappliedState.revisionId, profileId: 'p1_user_test', scenarioId: 'p1_normal',
+    path: '/mesp-wpm/refactor/queryMultiEnterpriseListII.json', status: 200
+  })}\n`)
+  assert.equal((await verifyAgain()).status, 200, 'A current revision-tagged request must count')
+  assert.equal((await get('/mock/refactor/queryMultiEnterpriseListII.json', { method: 'POST', body: '{}' })).status, 200)
+  assert.equal((await verifyAgain()).status, 200)
+  assert.equal((await observeAgain('/mm2606290/#/credit/productCombine')).status, 202)
+  assert.equal((await (await get('/__desktop/result', { headers })).json()).status, 'verified',
+    'An identical page observation must preserve its successful verification')
+  assert.equal((await observeAgain('/mm2606290/#/credit/productCombineExtra')).status, 202)
+  assert.notEqual((await (await get('/__desktop/result', { headers })).json()).status, 'verified',
+    'A later page observation must revoke the previous verification')
+  const wrongRouteVerification = await verifyAgain()
+  assert.equal(wrongRouteVerification.status, 422, 'A route prefix must not satisfy the exact target route')
+  const wrongRouteResult = await wrongRouteVerification.json()
+  assert.equal(wrongRouteResult.checks.route, false)
+  assert.equal(wrongRouteResult.code, 'E_PREVIEW_VERIFICATION_FAILED')
+  assert.match(wrongRouteResult.error, /route mismatch: expected \/credit\/productCombine, observed \/credit\/productCombineExtra/)
+  assert.match(wrongRouteResult.error, /retry keeps the saved route and text assertions/)
+  assert.equal((await observeAgain('/mm2606290/#/credit/productCombine')).status, 202)
+  const textFailure = await get('/__desktop/verify', { method: 'POST', headers,
+    body: JSON.stringify({ route: '/credit/productCombine', containsText: ['required-but-absent'], absentText: ['P1'] }) })
+  assert.equal(textFailure.status, 422)
+  const textFailureResult = await textFailure.json()
+  assert.equal(textFailureResult.code, 'E_PREVIEW_VERIFICATION_FAILED')
+  assert.match(textFailureResult.error, /missing required text \(1\): \["required-but-absent"\]/)
+  assert.match(textFailureResult.error, /forbidden text present \(1\): \["P1"\]/)
+  assert.doesNotMatch(textFailureResult.error, /route mismatch/)
+  const partialVerify = async extra => get('/__desktop/verify', { method: 'POST', headers,
+    body: JSON.stringify({ route: '/credit/productCombine', containsText: ['P1'], absentText: ['系统繁忙'],
+      expectedProfileId: 'p1_user_test', partial: true, ...extra }) })
+  const partialResponse = await partialVerify({ apiUrls: ['/refactor/queryMultiEnterpriseListII.json'] })
+  assert.equal(partialResponse.status, 200)
+  const partialResult = await partialResponse.json()
+  assert.equal(partialResult.verified, true, 'An individual page check may pass without completing the workflow')
+  assert.equal(partialResult.sessionId, 'default')
+  assert.equal(partialResult.profileId, 'p1_user_test')
+  assert.equal(partialResult.revisionId, reappliedState.revisionId)
+  assert.equal(partialResult.pageObservation.revisionId, reappliedState.revisionId)
+  assert.equal(partialResult.requestEvidence[0].request.revisionId, reappliedState.revisionId)
+  assert.equal(partialResult.requestEvidence[0].scenarioId, 'p1_normal')
+  assert.equal(partialResult.requestEvidence[0].request.status, 200)
+  assert.ok(Date.parse(partialResult.checkedAt) >= Date.parse(partialResult.pageObservation.observedAt))
+  assert.equal((await (await get('/__desktop/state', { headers })).json()).verified, false,
+    'A passed partial page check must not mark the complete scenario verified')
+  assert.equal((await partialVerify({ expectedProfileId: 'another_profile' })).status, 422,
+    'Page checks must verify the workflow Profile, not merely any active Profile')
+  assert.equal((await partialVerify({ apiUrls: ['/unrelated/api.json'] })).status, 422)
+  assert.equal((await partialVerify({ apiUrls: [] })).status, 422)
+  assert.equal((await partialVerify({ apiUrls: ['/refactor/queryMultiEnterpriseListII.json'], partial: false })).status, 422,
+    'Final verification may not narrow its API bindings')
+  assert.equal((await verifyAgain()).status, 200)
   const restoredWorkflowModeResponse = await get('/__desktop/workflow-mode/set', {
     method: 'POST', headers, body: JSON.stringify({ mode: 'workflow' })
   })
@@ -624,7 +907,7 @@ try {
   assert.equal((await (await get('/__desktop/state', { headers })).json()).profileId, '')
   assert.equal((await (await get('/__desktop/state', { headers: sessionAHeaders })).json()).profileId, '')
   const assistedBeforeClose = await get('/__desktop/analysis-mode/set', {
-    method: 'POST', headers, body: JSON.stringify({ mode: 'assisted' })
+    method: 'POST', headers, body: JSON.stringify({ mode: 'assisted', exactScenarioEquivalence: false })
   })
   assert.equal(assistedBeforeClose.status, 200)
   const pendingBeforeClose = await get('/__desktop/analyze-target', {
@@ -632,6 +915,7 @@ try {
     body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })
   })
   assert.equal(pendingBeforeClose.status, 200)
+  const preRestartState = await (await get('/__desktop/state', { headers })).json()
   await new Promise(done => {
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
     child.once('exit', () => { clearTimeout(timer); done() }); child.kill('SIGTERM')
@@ -657,6 +941,13 @@ try {
       restartedChild.once('error', error => { clearTimeout(timer); reject(error) })
       restartedChild.once('exit', code => { clearTimeout(timer); reject(new Error(`Restart exited ${code}`)) })
     })
+    const restoredState = await (await fetch(new URL('/__desktop/state', restartedReady.origin), { headers })).json()
+    assert.equal(restoredState.revision, preRestartState.revision)
+    assert.notEqual(restoredState.revisionId, preRestartState.revisionId,
+      'A restarted preview must receive a new evidence correlation ID')
+    assert.equal(new URL(restoredState.url).searchParams.get('__dshRevisionId'), restoredState.revisionId)
+    const restartedPreferences = await (await fetch(new URL('/__desktop/analysis-mode', restartedReady.origin), { headers })).json()
+    assert.equal(restartedPreferences.exactScenarioEquivalence, false, 'The rollback switch must survive Runtime restart')
     const restoredHintResponse = await fetch(new URL('/__desktop/analyze-target', restartedReady.origin), {
       method: 'POST', headers: workflowHeaders,
       body: JSON.stringify({ routePath: '/repay/receiptList', query: '借据状态正常' })

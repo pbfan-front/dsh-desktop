@@ -21,7 +21,8 @@ import {
   resolveEnvironmentPath,
   resolveShellEnvironment,
   reserveLoopbackPort,
-  updateReadyStability
+  updateReadyStability,
+  withDesktopHarnessEnvironment
 } from '../src/main/runtime/harness-runtime'
 import { canGrantWindowPermission, isTrustedAppUrl } from '../src/main/security-policy'
 import { buildDisclaimedUtilityProcessSpec } from '../src/main/runtime/disclaimed-utility-process'
@@ -199,6 +200,16 @@ describe('Harness launch contract', () => {
       }
     })
     expect(options.env).toHaveProperty('ELECTRON_RUN_AS_NODE', '1')
+  })
+
+  it('passes the late-bound business connection to Harness without losing the login-shell PATH', () => {
+    const captured = { PATH: '/shell/bin', DSH_BUSINESS_CONNECTION_FILE: '/stale/connection.json' }
+    const current = { DSH_BUSINESS_CONNECTION_FILE: '/desktop/connection.json' }
+    const merged = withDesktopHarnessEnvironment(captured, current)
+    const options = buildHarnessSpawnOptions('/launch-root', '/harness', 'darwin', merged)
+    expect(options.env).toMatchObject({ PATH: '/shell/bin', DSH_BUSINESS_CONNECTION_FILE: '/desktop/connection.json' })
+    expect(captured.DSH_BUSINESS_CONNECTION_FILE).toBe('/stale/connection.json')
+    expect(withDesktopHarnessEnvironment(captured, {})).not.toHaveProperty('DSH_BUSINESS_CONNECTION_FILE')
   })
 
   it('asks the patched Harness to resolve Safe Mode plugins from its installation only', () => {

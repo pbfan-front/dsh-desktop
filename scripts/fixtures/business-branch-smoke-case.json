@@ -1,0 +1,20 @@
+{
+  "id": "receipt-default-isolation-smoke",
+  "review": { "status": "candidate" },
+  "coverage": { "target": "explicit-route", "behavior": "default-branch" },
+  "intent": "借据列表正常展示，优先分析 loanNbr/loanNbr.json 接口",
+  "routePath": "/repay/receiptList",
+  "apiUrl": "/loanNbr/loanNbr.json",
+  "mockFields": [{ "path": ["data", "list", 0, "duestatus"], "equals": "0" }],
+  "visibleText": ["借据列表"],
+  "absentText": ["系统繁忙"],
+  "branchIsolation": {
+    "requestPath": "/mock/mesp-wpm/loanNbr/loanNbr.json",
+    "default": {
+      "scenarioId": "多个优惠券提示",
+      "mockFields": [{ "path": ["data", "list", 0, "duestatus"], "equals": "1" }],
+      "visibleText": ["借据列表"],
+      "absentText": ["系统繁忙"]
+    }
+  }
+}
