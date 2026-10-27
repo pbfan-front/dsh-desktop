@@ -172,6 +172,9 @@ window.__ModuleLoader__.load({
       const run = state.run
       React.useEffect(() => setRoute(''), [run?.id])
       if (run && sessionOf(run) !== sessionId || !run && !state.error) return null
+      // Completed results belong in diagnostics; keep the conversation dock for actionable work.
+      // Leave the controller mounted so a later request can show its own confirmation.
+      if (state.phase === 'verified') return null
       const proposal = proposalFor(run), plan = proposal?.output
       const choices = choicesFor(run)
       const busy = Boolean(state.busy)

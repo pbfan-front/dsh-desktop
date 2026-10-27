@@ -136,7 +136,8 @@ it('waits quietly for the right branch/page, then checks ordered pages through t
   f.page.route = plan.verificationSteps[1].route
   await f.emit({ fingerprint: 'd'.repeat(64) }); await f.tick()
   expect(f.runtime.getRun('experience-run').status).toBe('completed')
-  expect(f.container.textContent).toContain('本次保存的接口和页面检查已通过')
+  expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+  expect(f.container.textContent).toBe('')
   expect(f.requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/verify').map(([, input]) => input)).toEqual([
     { ...plan.verificationSteps[0], id: undefined, label: undefined, partial: true, expectedProfileId: plan.profileId },
     { ...plan.verificationSteps[1], id: undefined, label: undefined, partial: true, expectedProfileId: plan.profileId },
@@ -215,7 +216,8 @@ it('finishes a single-page branch without a Verify click and keeps only one chec
   await act(async () => { release(); await f.page.hold })
   expect(f.runtime.getRun('experience-run').status).toBe('completed')
   expect(f.bridge.resumeBusinessWorkflow).toHaveBeenCalledTimes(1)
-  expect(f.container.textContent).toContain('检查已通过')
+  expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+  expect(f.container.textContent).toBe('')
   expect(f.container.textContent).not.toContain('验证当前步骤')
 })
 
