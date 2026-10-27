@@ -39,7 +39,12 @@ describe('business target selection over the process bridge', () => {
     let output = ''
     child.stderr?.on('data', chunk => { output = `${output}${chunk}`.slice(-2000) })
     const runtime = new BusinessWorkflowRuntime()
+    let loseNextCreationEvidence = false
     const requestBusiness = async (path: string, body: unknown, sessionId?: string) => {
+      if (path === '/__desktop/create-profile' && loseNextCreationEvidence) {
+        loseNextCreationEvidence = false
+        body = { ...(body as Record<string, unknown>), evidenceId: 'lost-after-restart' }
+      }
       const response = await fetch(`${origin}${path}`, {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json',
           'X-DSH-Workflow-Token': workflowToken, ...(sessionId ? { 'X-DSH-Session': sessionId } : {}) },
@@ -115,6 +120,62 @@ describe('business target selection over the process bridge', () => {
         return { status: response.status, body: await response.json() as Record<string, any> }
       }
       const query = '借据列表正常展示：同一卡片显示借据号和正常。创建后不自动选中。'
+      let previewState = await (await fetch(`${origin}/__desktop/state`, { headers: { 'X-DSH-Session': sessionId } })).json()
+      const baselineInput = { profileId: 'bridge_default_branch', query: '创建借据列表页的体验分支',
+        targetPage: '借据列表页', routePath: '/repay/receiptList' }
+      expect((await fetch(`${origin}/__desktop/create-default-branch`, { method: 'POST', body: JSON.stringify(baselineInput) })).status).toBe(401)
+      const branchTool = definitions.find(item => item.name === 'business_create_default_branch')
+      if (!branchTool) throw new Error('Default branch tool was not registered')
+      await expect(branchTool.execute(baselineInput, {})).rejects.toThrow('current conversation identity')
+      expect((await post('/__desktop/create-default-branch', { ...baselineInput, data: { status: '0' } })).status).toBe(422)
+      const baseline = await callTool('business_create_default_branch', baselineInput)
+      expect(baseline).toMatchObject({ profileId: baselineInput.profileId, created: true, dataMode: 'default',
+        apiOverrideCount: 0, applied: false, verified: false, activation: 'user-selection-required', routePath: '/repay/receiptList' })
+      const baselineDocument = JSON.parse(await readFile(join(userRoot, 'src/baseTypes/api/mock-profiles.json'), 'utf8'))
+      expect(baselineDocument.profiles.find((item: { id: string }) => item.id === baselineInput.profileId)).toMatchObject({ apis: {}, dataMode: 'default' })
+      expect((await callTool('business_create_default_branch', baselineInput)).created).toBe(false)
+      expect((await post('/__desktop/create-default-branch', { ...baselineInput, routePath: '/credit/productCombine' })).status).toBe(409)
+      const semanticRule = semanticRules.find(rule => rule.id === 'receipt-normal-status')!
+      expect((await post('/__desktop/create-default-branch', { ...baselineInput, profileId: 'rejected_state_branch', query: semanticRule.intentEquals })).status).toBe(422)
+      expect(await (await fetch(`${origin}/__desktop/state`, { headers: { 'X-DSH-Session': sessionId } })).json()).toEqual(previewState)
+      const defaultRequest = await fetch(`${origin}/mock/loanNbr/loanNbr.json`, { headers: { 'X-DSH-Session': sessionId } })
+      expect(defaultRequest.status).toBe(200)
+      const defaultData = await defaultRequest.json()
+      expect((await post('/__desktop/apply-ui', { profileId: baselineInput.profileId })).status).toBe(200)
+      const baselineRequest = await fetch(`${origin}/mock/loanNbr/loanNbr.json`, { headers: { 'X-DSH-Session': sessionId } })
+      expect(baselineRequest.headers.get('x-local-mock-scenario')).toBe(defaultRequest.headers.get('x-local-mock-scenario'))
+      expect((await baselineRequest.json()).data).toEqual(defaultData.data)
+      expect((await post('/__desktop/default-ui', {})).status).toBe(200)
+      const visibleProfiles = await (await fetch(`${origin}/api/profiles`)).json()
+      expect(visibleProfiles.profiles.find((item: { id: string }) => item.id === baselineInput.profileId)).toMatchObject({ ok: true, apis: [], routePath: '/repay/receiptList' })
+      expect((await post('/__desktop/rollback', { operationId: baseline.operationId })).status).toBe(200)
+      previewState = await (await fetch(`${origin}/__desktop/state`, { headers: { 'X-DSH-Session': sessionId } })).json()
+      const diagnosticBatch = { schemaVersion: 1, documentId: 'bridge-document', identity: {
+        sessionId, profileId: previewState.profileId, revision: previewState.revision, revisionId: previewState.revisionId
+      }, events: [{ kind: 'lifecycle', level: 'info', name: 'collector-start' }, {
+        kind: 'network', level: 'error', phase: 'failed', method: 'GET', url: 'http://127.0.0.1/contract.pdf?token=PRIVATE',
+        status: 0, message: 'token=PRIVATE', responseBody: 'PRIVATE CONTRACT'
+      }] }
+      const diagnosticUrl = `${origin}/__desktop/diagnostics-ui`
+      expect((await fetch(diagnosticUrl, { method: 'POST', body: JSON.stringify(diagnosticBatch) })).status).toBe(401)
+      expect((await fetch(diagnosticUrl, { method: 'POST', headers: { Origin: 'http://evil.test', 'Sec-Fetch-Site': 'same-origin' }, body: JSON.stringify(diagnosticBatch) })).status).toBe(403)
+      const guiHeaders = { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'X-DSH-Session': sessionId }
+      expect((await fetch(diagnosticUrl, { method: 'POST', headers: guiHeaders, body: '{invalid' })).status).toBe(422)
+      expect((await fetch(diagnosticUrl, { method: 'POST', headers: guiHeaders, body: JSON.stringify(diagnosticBatch) })).status).toBe(202)
+      expect((await fetch(diagnosticUrl, { method: 'POST', headers: guiHeaders, body: ' '.repeat(65537) })).status).toBe(413)
+      expect((await fetch(`${origin}/__desktop/diagnostics`, { headers: guiHeaders })).status).toBe(401)
+      const diagnosticRead = await callTool('business_preview_diagnostics', { kind: 'network', limit: 10 })
+      expect(diagnosticRead.coverage.captured).toBe(true)
+      expect(diagnosticRead.events).toHaveLength(1)
+      expect(diagnosticRead.events[0]).toMatchObject({ status: 0, phase: 'failed', url: 'http://127.0.0.1/contract.pdf' })
+      expect(JSON.stringify(diagnosticRead)).not.toContain('PRIVATE')
+      expect(diagnosticRead.scenario.failureCategory).toBe('profile-not-applied')
+      const other = await fetch(`${origin}/__desktop/diagnostics`, { headers: { Authorization: `Bearer ${token}`, 'X-DSH-Session': 'other-session' } })
+      expect((await other.json()).events).toEqual([])
+      const tool = definitions.find(item => item.name === 'business_preview_diagnostics')
+      if (!tool) throw new Error('Diagnostic tool was not registered')
+      await expect(tool.execute({}, {})).rejects.toThrow('current conversation identity')
+      expect(await (await fetch(`${origin}/__desktop/state`, { headers: { 'X-DSH-Session': sessionId } })).json()).toEqual(previewState)
       const observation = { route: '/repay/receiptList', title: 'Read-only fixture', text: 'Private page text' }
       expect((await post('/__desktop/page-observation-ui', observation)).status).toBe(202)
       await vi.waitFor(() => expect(observed).toHaveLength(1))
@@ -248,7 +309,9 @@ describe('business target selection over the process bridge', () => {
       await expect(approveBusinessScenarioPlan(runtime, runId, { proposalId: receipt.checkpointProposal.id,
         sessionId })).rejects.toThrow('changed')
       expect((await post('/__desktop/workflow/approve-proposal', { runId, proposalId: staged.body.checkpointProposal.id })).status).toBe(404)
+      loseNextCreationEvidence = true
       const created = await approveBusinessScenarioPlan(runtime, runId, { proposalId: shortReceipt.checkpointProposal.id, sessionId })
+      expect(created.context.creationEvidenceRefresh).toMatchObject({ confirmedPlanUnchanged: true })
       expect(created).toMatchObject({ currentStepId: 'wait-for-preview', context: { profileId: 'bridge_review' } })
       expect((await requestBusiness('/__desktop/state', {}, sessionId) as { profileId: string }).profileId).toBe('')
       expect((await post('/__desktop/workflow/cancel', { runId })).status).toBe(200)

@@ -9,6 +9,8 @@ import { createBusinessMockStore } from './business-mock-store.mjs'
 import { createBusinessSourceEvidence, sourceEvidenceTarget } from './business-source-evidence.mjs'
 import { groupEquivalentScenarioMatches } from './business-scenario-equivalence.mjs'
 import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, validSemanticSourceRequest } from './business-control-contract.mjs'
+import { createPreviewDiagnostics } from './business-preview-diagnostics.mjs'
+import { createDefaultBranchService, isDefaultDataBranch } from './business-default-branch.mjs'
 
 // This process serves an exported package only. It does not launch npm or a dev server.
 export async function startBusinessRuntime({ packageRoot, userRoot, token, port = 0 }) {
@@ -650,7 +652,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     const preferencesStartedAt = performance.now()
     const preferences = await readAnalysisPreferences()
-    const reuseEnabled = preferences.sessionReuse && semanticExpectations.length === 0
+    const reuseEnabled = preferences.sessionReuse && semanticExpectations.length === 0 && input.forceFresh !== true
     const reuseKey = contentHash({
       sessionId,
       sourceDigest: codeIntellStatus.sourceDigestSha256 || codeIntellLifecycleStamp,
@@ -974,6 +976,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             evidence: fieldEvidence.filter(item => item.evidence.length > 0).slice(0, 12) } }
       })
       apis.push({ ...candidate, mockPath: relativePath, mockExists: Boolean(existing), canGenerate: Boolean(existing || generated), typeEvidence: generated?.typeEvidence,
+        mockConfigSha256: contentHash(config),
         label: config.label || candidate.apiUrl,
         envelopeFields: objectFields(template), fields: payloadFields(template.data),
         scenarios: scenarioSummaries })
@@ -1275,12 +1278,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       route: { path: route.path, title: route.title || route.comment || route.name, component: componentFile, moduleFile: route.moduleFile },
       routeCandidates: routeCandidates.map(item => ({ path: item.path, title: item.title || item.comment || item.name, component: `src/${item.component}` })),
       apis, analysisPlan,
+      creationSnapshot: { version: 1, sourceDigestSha256: codeIntellStatus.sourceDigestSha256 || contentHash(codeIntellLifecycleStamp),
+        indexStampSha256: contentHash(codeIntellLifecycleStamp),
+        sourceFilesSha256: contentHash(relevantSource.map(item => [item.file, contentHash(item.text)]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+        apis: Object.fromEntries(apis.map(api => [api.apiUrl, api.mockConfigSha256])) },
       acceleration,
       analysisReuse: { enabled: reuseEnabled, reused: false, scope: 'same-session-exact-input', analyzedAt, sourceRevalidated: true }
     }
     const resultPreparedAt = performance.now()
     const evidenceRecord = { routePath: route.path, sessionId, componentFile, lifecycleStamp: codeIntellLifecycleStamp,
-      apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists, typeEvidence: api.typeEvidence }])),
+      apis: new Map(apis.map(api => [api.apiUrl, { mockPath: api.mockPath, mockExists: api.mockExists,
+        typeEvidence: api.typeEvidence, mockConfigSha256: api.mockConfigSha256 }])),
       expiresAt: expiresAtMs }
     analysisEvidence.set(evidenceId, evidenceRecord)
     const evidenceStoredAt = performance.now()
@@ -1356,6 +1364,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     }
     return result
   }
+  const defaultBranches = createDefaultBranchService({ resolveTarget, readProfiles, catalog, atomicJson,
+    profileFile: userProfileFile, userRoot, projectId: manifest.projectId, schemaVersion: USER_DATA_SCHEMA_VERSION,
+    semanticRules: manifest.scenarioSemanticRules,
+    onCreated(profile) {
+      creationRecords.set(profile.id, { createdAt: profile._dshDefaultBranch.createdAt,
+        routePath: profile.routePath, dataMode: 'default', apis: [] })
+      invalidateSessionAnalysisReuse()
+    } })
   await migrateUserData()
   const defaultSessionId = 'default'
   const runtimeStateFile = join(userRoot, '.preview-runtime-state.json')
@@ -1370,6 +1386,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const sessionStates = new Map()
   const pageObservations = new Map()
   const verificationResults = new Map()
+  const previewDiagnostics = createPreviewDiagnostics()
   const creationRecords = new Map()
   const businessAppUrl = route => {
     const target = new URL(developmentAppUrl || `${origin}${manifest.businessPath}`)
@@ -1484,6 +1501,17 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       requests: requests.slice(-30), page: pageObservation && { ...pageObservation, text: pageObservation.text.slice(0, 1000) }, verification }
   }
   let nextHandler
+  // All Profile-file mutations share one queue, including the default-data fast path.
+  // Holding only leaf mutation requests avoids blocking the workflow bridge that calls them.
+  let profileMutationTail = Promise.resolve()
+  const profileMutationPaths = new Set(['/__desktop/create-default-branch', '/__desktop/create-profile', '/__desktop/user-data/import', '/__desktop/rollback'])
+  const acquireProfileMutation = async () => {
+    const previous = profileMutationTail
+    let release
+    profileMutationTail = new Promise(done => { release = done })
+    await previous
+    return release
+  }
   const respond = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)) }
   const validateMockRequest = async (apiUrl, profileId, scenarioId) => {
     const headers = {}
@@ -1508,6 +1536,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
     return { apiUrl, profileId, scenarioId, status: statusCode }
   }
   const server = http.createServer(async (req, res) => {
+    let releaseProfileMutation
     try {
       const url = new URL(req.url, origin)
       const sessionId = requestSessionId(req, url)
@@ -1518,8 +1547,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (req.headers['sec-fetch-site'] === 'cross-site') return respond(res, 403, { error: 'Cross-site request' })
       if (url.pathname.startsWith('/__desktop/')) {
         const publicRead = req.method === 'GET' && ['/__desktop/state', '/__desktop/result-ui'].includes(url.pathname)
-        const trustedUI = ['/__desktop/apply-ui', '/__desktop/default-ui', '/__desktop/page-observation-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
+        const trustedUI = ['/__desktop/apply-ui', '/__desktop/default-ui', '/__desktop/page-observation-ui', '/__desktop/diagnostics-ui'].includes(url.pathname) && req.method === 'POST' && req.headers.origin === origin && req.headers['sec-fetch-site'] === 'same-origin'
         if (!publicRead && !trustedUI && req.headers.authorization !== `Bearer ${token}`) return respond(res, 401, { error: 'Unauthorized' })
+        if (req.method === 'POST' && profileMutationPaths.has(url.pathname)) releaseProfileMutation = await acquireProfileMutation()
         if (url.pathname.startsWith('/__desktop/workflow/') && req.method === 'POST') {
           let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 262144) return respond(res, 413, { error: 'Request too large' }) }
           const payload = body ? JSON.parse(body) : {}
@@ -1541,6 +1571,14 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             return respond(res, 200, await requestDesktopWorkflow(action, workflowPayload))
           }
           catch (error) { return respond(res, 422, { error: error.message }) }
+        }
+        if (url.pathname === '/__desktop/create-default-branch' && req.method === 'POST') {
+          let body = ''
+          for await (const chunk of req) { body += chunk; if (body.length > 8192) return respond(res, 413, { error: 'Request too large' }) }
+          try {
+            const result = await defaultBranches.create(JSON.parse(body), sessionId)
+            return respond(res, result.created ? 201 : 200, result)
+          } catch (error) { return respond(res, error.status || 422, { error: error.message, code: error.code, candidates: error.candidates }) }
         }
         if (url.pathname === '/__desktop/context') return respond(res, 200, { projectId: manifest.projectId, buildId: manifest.buildId, sourceRoot: source, userRoot, sessionId, state, userData: userDataStatus, codeIntell: await refreshCodeIntell(), analysis: await readAnalysisPreferences(), workflow: await readWorkflowPreferences() })
         if (url.pathname === '/__desktop/code-intell/status') return respond(res, 200, await refreshCodeIntell())
@@ -1702,6 +1740,23 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           try { return respond(res, 200, await analyzeTarget(JSON.parse(body), sessionId)) } catch (error) { return respond(res, 422, { error: error.message }) }
         }
         if (url.pathname === '/__desktop/state') return respond(res, 200, state)
+        if (url.pathname === '/__desktop/diagnostics' && req.method === 'GET') {
+          const result = previewDiagnostics.read(sessionId, state, url.searchParams)
+          if (result.status === 200) {
+            const current = await scenarioResult(sessionId, state, pageObservation)
+            result.body.scenario = { status: current.status, failureCategory: current.failureCategory,
+              apiBindings: current.apiBindings.slice(0, 24).map(({ apiUrl, scenarioId, hit }) => ({ apiUrl, scenarioId, hit })) }
+            result.body.page = pageObservation ? { route: businessRoutePath(pageObservation.route), observedAt: pageObservation.observedAt } : null
+          }
+          return respond(res, result.status, result.body)
+        }
+        if (url.pathname === '/__desktop/diagnostics-ui' && req.method === 'POST') {
+          let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 65536) return respond(res, 413, { error: 'Diagnostic batch too large' }) }
+          let input
+          try { input = JSON.parse(body) } catch { return respond(res, 422, { error: 'Invalid diagnostic JSON' }) }
+          const result = previewDiagnostics.append(sessionId, state, input)
+          return respond(res, result.status, result.body)
+        }
         if (url.pathname === '/__desktop/result-ui') return respond(res, 200, await scenarioResult(sessionId, state, pageObservation))
         if (url.pathname === '/__desktop/open-preview' && req.method === 'POST') {
           process.send?.({ type: 'show-preview' })
@@ -1813,7 +1868,12 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             })
           }
           const analysis = analysisEvidence.get(input.evidenceId)
-          if (!analysis || analysis.expiresAt < Date.now()) return respond(res, 422, { error: 'A current business_analyze_target evidenceId is required before creating a Profile' })
+          await refreshCodeIntell()
+          if (!analysis || analysis.expiresAt < Date.now() || codeIntellStatus.state !== 'ready' || analysis.lifecycleStamp !== codeIntellLifecycleStamp) {
+            return respond(res, 422, { code: BUSINESS_CONTROL_ERROR.analysisEvidenceStale,
+              error: 'Analysis evidence expired, was lost after Runtime restart, or belongs to an older index. Refresh analysis for the saved route and plan before creating a Profile.' })
+          }
+          if (analysis.sessionId !== sessionId) return respond(res, 403, { code: 'E_ANALYSIS_SESSION_MISMATCH', error: 'Analysis evidence belongs to another conversation.' })
           if (analysis.routePath !== input.profile.routePath) return respond(res, 422, { error: `Profile routePath does not match analyzed route ${analysis.routePath}` })
           const operationId = randomUUID()
           const rollback = { operationId, files: [] }
@@ -1843,6 +1903,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
                 existing = { file: join(userRoot, relativePath), config: generated.config }
               } catch (error) { return respond(res, 422, { error: error.message }) }
             }
+            if (apiEvidence.mockConfigSha256 !== contentHash(existing.config)) return respond(res, 422, {
+              code: BUSINESS_CONTROL_ERROR.analysisSourceChanged, retryable: false,
+              error: `Mock source changed after analysis for ${item.apiUrl}; review the current source and confirm a new plan before creating a Profile.` })
             const existingScenarios = scenarioArray(existing.config)
             const sourceScenario = hasSourceScenario ? existingScenarios.find(value => value.id === item.sourceScenarioId) : undefined
             if (hasSourceScenario && !sourceScenario) return respond(res, 422, { error: `Source Scenario does not exist for ${item.apiUrl}: ${item.sourceScenarioId}` })
@@ -1902,7 +1965,11 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           if (!/^[0-9a-f-]{36}$/.test(operationId || '')) return respond(res, 422, { error: 'Invalid operation id' })
           const rollbackFile = join(userRoot, '.rollbacks', `${operationId}.json`)
           const rollback = JSON.parse(await readFile(rollbackFile, 'utf8'))
-          await restoreRollback(rollback)
+          if (rollback.defaultBranch) {
+            try { await defaultBranches.rollback(rollback, operationId) }
+            catch (error) { return respond(res, error.status || 422, { error: error.message, code: error.code }) }
+          }
+          else await restoreRollback(rollback)
           middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
           invalidateSessionAnalysisReuse()
           const availableProfileIds = new Set((await catalog()).map(profile => profile.id))
@@ -1958,7 +2025,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           const profile = (await catalog()).find(item => item.id === profileId)
           if (!profile) return respond(res, 404, { error: 'Unknown profile' })
           const bindings = Object.entries(profile.apis || {})
-          if (bindings.length < 1) return respond(res, 422, { error: 'Profile contains no API bindings' })
+          if (bindings.length < 1 && !isDefaultDataBranch(profile)) return respond(res, 422, { error: 'Profile contains no API bindings' })
           const isUserProfile = (await readProfiles(userProfileFile)).some(item => item.id === profileId)
           if (isUserProfile) {
             for (const [apiUrl, selection] of bindings) {
@@ -2032,6 +2099,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
       if (!nextHandler) return respond(res, 503, { error: 'Starting' })
       await nextHandler(req, res)
     } catch (error) { if (!res.headersSent) respond(res, 500, { error: error.message }); else res.destroy() }
+    finally { releaseProfileMutation?.() }
   })
   let origin
   await new Promise((done, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', done) })

@@ -12,6 +12,7 @@ import type { BusinessWorkflowRuntime } from './business-workflow-runtime'
 import type { BusinessPluginWorkflowDeclaration } from './business-plugin-contract'
 import type { BusinessPluginSemanticRule } from './business-plugin-contract'
 import { BUSINESS_CONTROL_ERROR, profileCreationRequestError, resolveSemanticIntent, validSemanticSourceRequest } from '../shared/business-control-contract'
+import { assertCreationEvidenceRefreshable, assertCreationEvidenceUnchanged, isStaleCreationEvidence } from './business-creation-evidence'
 
 export const BUSINESS_SCENARIO_WORKFLOW_ID = 'business-scenario-create'
 
@@ -97,8 +98,31 @@ export function registerBusinessScenarioWorkflow(options: {
       }
       const requestError = profileCreationRequestError(request)
       if (requestError) throw new Error(`Profile creation request does not satisfy the shared business control contract: ${requestError}`)
-      const created = await options.requestBusiness('/__desktop/create-profile', request, input.sessionId)
-      return { output: created, contextPatch: { profileId: plan.profileId, plan } }
+      let created: unknown
+      let refreshedAnalysis: Record<string, unknown> | undefined
+      try { created = await options.requestBusiness('/__desktop/create-profile', request, input.sessionId) }
+      catch (error) {
+        // Only this explicit pre-write failure is safe to recover automatically.
+        // Never replay a timed-out/unknown write or replace the confirmed plan.
+        if (!isStaleCreationEvidence(error)) throw error
+        const apiUrls = plan.scenarios.map(item => item.apiUrl)
+        assertCreationEvidenceRefreshable(analysis, apiUrls)
+        refreshedAnalysis = record(await options.requestBusiness('/__desktop/analyze-target', {
+          routePath: target.routePath, query: input.query, apiUrls, forceFresh: true,
+          ...(semanticRules.length ? { semanticExpectations: semanticRules } : {})
+        }, input.sessionId), 'Refreshed workflow analysis result is missing.')
+        assertCreationEvidenceUnchanged(analysis, refreshedAnalysis, apiUrls)
+        assertAnalysisQuality(refreshedAnalysis)
+        assertSemanticSourceValues(semanticRules, plan, refreshedAnalysis)
+        created = await options.requestBusiness('/__desktop/create-profile', {
+          ...request, evidenceId: text(refreshedAnalysis.evidenceId, 'Refreshed workflow evidenceId is missing.')
+        }, input.sessionId)
+      }
+      return { output: created, contextPatch: { profileId: plan.profileId, plan,
+        ...(refreshedAnalysis ? { analysis: refreshedAnalysis, creationEvidenceRefresh: {
+          previousEvidenceId: evidenceId, evidenceId: refreshedAnalysis.evidenceId, refreshedAt: new Date().toISOString(),
+          confirmedPlanUnchanged: true
+        } } : {}) } }
     },
     'apply-profile': async ({ context }) => {
       const profileId = text(context.profileId, 'Workflow profileId is missing.')

@@ -1,5 +1,7 @@
 export const BUSINESS_CONTROL_ERROR: Readonly<{
   targetRouteAmbiguous: 'E_TARGET_ROUTE_AMBIGUOUS'
+  analysisEvidenceStale: 'E_ANALYSIS_EVIDENCE_STALE'
+  analysisSourceChanged: 'E_ANALYSIS_SOURCE_CHANGED'
   previewVerificationFailed: 'E_PREVIEW_VERIFICATION_FAILED'
   semanticValueUnverified: 'WORKFLOW_SEMANTIC_VALUE_UNVERIFIED'
   semanticSourceChanged: 'WORKFLOW_SEMANTIC_SOURCE_CHANGED'

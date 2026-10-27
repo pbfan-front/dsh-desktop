@@ -224,7 +224,7 @@ export class BusinessPreview {
       throw Object.assign(new Error(typeof payload.error === 'string' ? payload.error : `Business control request failed: HTTP ${response.status}`), {
         ...(typeof payload.code === 'string' ? { code: payload.code } : {}),
         ...(Array.isArray(payload.candidates) ? { candidates: payload.candidates } : {}),
-        retryable: true
+        retryable: payload.retryable !== false
       })
     }
     return payload

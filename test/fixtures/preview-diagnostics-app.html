@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>隔离诊断采集验收</title>
+<h1>隔离诊断采集验收</h1>
+<p>仅产生本地测试日志和示例请求，不执行业务提交。</p>
+<button id="pdf">请求示例 PDF</button>
+<button id="warning">产生脱敏测试警告</button>
+<button id="failure">产生受控异常</button>
+<button id="missing">请求不存在的资源</button>
+<p id="result" role="status">准备中</p>
+<script type="module">
+  import { installLocalMockDiagnostics, markLocalPreviewDiagnostic } from '/collector.js';
+  window.process = { env: { VUE_APP_SCENE: 'local-mock' } };
+  installLocalMockDiagnostics();
+  let opens = 0;
+  const result = document.getElementById('result');
+  document.getElementById('pdf').onclick = async () => {
+    markLocalPreviewDiagnostic('pdf-reader-fixture', `open-${++opens}`);
+    const response = await fetch('/document.pdf?token=PRIVATE_SENTINEL');
+    // Consume as the application, not the collector. No document body is logged.
+    await response.arrayBuffer();
+    result.textContent = `第 ${opens} 次 PDF 请求完成：HTTP ${response.status}；不代表渲染成功`;
+  };
+  document.getElementById('warning').onclick = () => {
+    console.warn('Controlled warning token=PRIVATE_SENTINEL', { body: 'PRIVATE_DOCUMENT' });
+    result.textContent = '已产生警告';
+  };
+  document.getElementById('failure').onclick = () => { throw new Error('Controlled reader fixture failure'); };
+  document.getElementById('missing').onclick = async () => {
+    const request = new XMLHttpRequest();
+    request.open('GET', '/missing.pdf?token=PRIVATE_SENTINEL');
+    request.send();
+    result.textContent = '已请求不存在的资源';
+  };
+  result.textContent = '采集器就绪';
+</script>
+</html>

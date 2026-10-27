@@ -26,13 +26,14 @@ describe('business Harness plugin', () => {
       expect(routes).toHaveLength(1)
       expect(routes[0]).toMatchObject({ kind: 'exact', path: '/api/dsh-desktop/business-preview' })
       expect(definitions.map(tool => tool.name)).toEqual([
+        'business_create_default_branch',
         'business_propose_scenario_plan',
         'business_start_scenario_workflow', 'business_resume_scenario_workflow', 'business_scenario_workflow_status',
         'business_retry_scenario_workflow', 'business_cancel_scenario_workflow',
         'business_context', 'business_code_intell_status', 'business_analysis_mode', 'business_set_analysis_mode', 'business_clear_analysis_cache',
         'business_workflow_mode', 'business_set_workflow_mode',
         'business_user_data_status', 'business_export_scenarios', 'business_import_scenarios',
-        'business_analyze_target', 'business_list_profiles', 'business_inspect_source_evidence', 'business_inspect_mock_scenario', 'business_preview_evidence', 'business_scenario_result', 'business_verify_preview',
+        'business_analyze_target', 'business_list_profiles', 'business_inspect_source_evidence', 'business_inspect_mock_scenario', 'business_preview_evidence', 'business_preview_diagnostics', 'business_scenario_result', 'business_verify_preview',
         'business_apply_profile', 'business_create_profile', 'business_rollback'
       ])
       expect(definitions.every(tool => typeof tool.execute === 'function')).toBe(true)

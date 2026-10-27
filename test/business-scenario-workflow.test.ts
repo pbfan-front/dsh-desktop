@@ -581,6 +581,60 @@ describe('business scenario workflow', () => {
     expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/analyze-target')).toHaveLength(1)
   })
 
+  it('refreshes lost analysis once and preserves the confirmed plan when source fingerprints match', async () => {
+    const runtime = new BusinessWorkflowRuntime()
+    let analysisCount = 0, createCount = 0
+    const snapshot = { version: 1, sourceDigestSha256: 'a'.repeat(64), indexStampSha256: 'e'.repeat(64), sourceFilesSha256: 'b'.repeat(64),
+      apis: { '/quota/query.json': 'c'.repeat(64) } }
+    const requestBusiness = vi.fn(async (path: string, body: unknown) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') return { evidenceId: `fresh-${++analysisCount}`, creationSnapshot: snapshot }
+      if (path === '/__desktop/create-profile' && ++createCount === 1) {
+        throw Object.assign(new Error('Evidence lost'), { code: 'E_ANALYSIS_EVIDENCE_STALE', retryable: true })
+      }
+      return { ok: true }
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    const created = await runtime.resume(analyzed.id, plan)
+    expect(created.currentStepId).toBe('wait-for-preview')
+    expect(created.context.plan).toEqual(plan)
+    expect(created.context.creationEvidenceRefresh).toMatchObject({ previousEvidenceId: 'fresh-1', evidenceId: 'fresh-2', confirmedPlanUnchanged: true })
+    const requests = requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/create-profile').map(([, body]) => body)
+    expect(requests).toHaveLength(2)
+    expect(requests[1]).toEqual({ ...(requests[0] as Record<string, unknown>), evidenceId: 'fresh-2' })
+    expect(requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/analyze-target')[1]?.[1]).toMatchObject({
+      routePath: startInput.routePath, query: startInput.query, apiUrls: ['/quota/query.json'], forceFresh: true
+    })
+  })
+
+  it.each(['missing-snapshot', 'changed-source'])('stops stale-evidence recovery for %s without a second write', async mode => {
+    const runtime = new BusinessWorkflowRuntime()
+    let count = 0, writes = 0
+    const requestBusiness = vi.fn(async (path: string) => {
+      if (path === '/__desktop/resolve-target') return resolvedTarget
+      if (path === '/__desktop/analyze-target') {
+        count++
+        return { evidenceId: `e-${count}`, ...(mode === 'missing-snapshot' ? {} : { creationSnapshot: {
+          version: 1, sourceDigestSha256: 'a'.repeat(64), indexStampSha256: 'e'.repeat(64), sourceFilesSha256: 'b'.repeat(64),
+          apis: { '/quota/query.json': (count === 1 ? 'c' : 'd').repeat(64) }
+        } }) }
+      }
+      writes++
+      throw Object.assign(new Error('Evidence lost'), { code: 'E_ANALYSIS_EVIDENCE_STALE', retryable: true })
+    })
+    const start = registerBusinessScenarioWorkflow({ runtime, pluginId: 'com.dataelement.demo-test', requestBusiness })
+    const analyzed = await start(startInput)
+    const failed = await runtime.resume(analyzed.id, plan)
+    expect(failed.status).toBe('failed')
+    expect(failed.steps.find(step => step.id === 'create-profile')?.error).toMatchObject({
+      code: mode === 'missing-snapshot' ? 'WORKFLOW_ANALYSIS_REFRESH_REQUIRED' : 'WORKFLOW_ANALYSIS_CHANGED', retryable: false
+    })
+    expect(writes).toBe(1)
+    expect(count).toBe(mode === 'missing-snapshot' ? 1 : 2)
+    await expect(runtime.retry(failed.id)).rejects.toThrow('not retryable')
+  })
+
   it('cannot complete when the verification handler returns success without real request evidence', async () => {
     const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'run-gate' })
     const requestBusiness = vi.fn(async (path: string) => {

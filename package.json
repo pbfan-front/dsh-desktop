@@ -421,6 +421,14 @@
         "to": "business-control-contract.mjs"
       },
       {
+        "from": "build/business-preview-diagnostics.mjs",
+        "to": "business-preview-diagnostics.mjs"
+      },
+      {
+        "from": "build/business-default-branch.mjs",
+        "to": "business-default-branch.mjs"
+      },
+      {
         "from": "build/business-package",
         "to": "business-package"
       },
