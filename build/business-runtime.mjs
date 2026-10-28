@@ -44,7 +44,9 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
   const platform = await within(packageRoot, manifest.platformRoot)
   const require = createRequire(join(platform, 'package.json'))
   const createMock = require(join(packageRoot, 'localMockMiddleware.cjs'))
-  let middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+  // Preserve per-activation sequences when refreshing Mock files for another session.
+  const profileSequenceCounts = new Map()
+  let middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
   const codeIntellRoot = join(source, '.codeIntell')
   let codeRoutes = []
   let codeIndex = {}
@@ -1691,7 +1693,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             for (const [relativePath, config] of mockWrites) await atomicJson(join(userRoot, relativePath), config)
             await atomicJson(userProfileFile, { schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId, updatedAt: new Date().toISOString(), profiles })
             await migrateUserData()
-            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
             const summaries = await profileSummaries()
             const invalid = summaries.filter(profile => importedIds.has(profile.id)
               && profile.apis.some(api => !api.exists || !api.scenarioExists))
@@ -1703,7 +1705,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           } catch (error) {
             await restoreRollback(rollback)
             await migrateUserData()
-            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
             return respond(res, 422, { error: `User Mock import rolled back: ${error.message}` })
           }
         }
@@ -1940,7 +1942,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           try {
             for (const mutation of mutations) await atomicJson(mutation.file, mutation.value)
             await atomicJson(userProfileFile, { schemaVersion: USER_DATA_SCHEMA_VERSION, projectId: manifest.projectId, updatedAt: new Date().toISOString(), profiles })
-            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
             const summary = (await profileSummaries()).find(profile => profile.id === input.profile.id)
             if (!summary?.ok || summary.apis.length !== input.scenarios.length) throw new Error(`Created Profile failed binding validation (${summary?.issueCount ?? 'missing'} issue(s))`)
             const requestValidation = []
@@ -1955,7 +1957,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
               validation: { ok: true, apiBindings: summary.apis.map(api => ({ apiUrl: api.apiUrl, scenarioId: api.scenarioId })), requests: requestValidation } })
           } catch (error) {
             await restoreRollback(rollback)
-            middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+            middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
             return respond(res, 422, { error: `Profile creation rolled back: ${error.message}` })
           }
         }
@@ -1970,7 +1972,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
             catch (error) { return respond(res, error.status || 422, { error: error.message, code: error.code }) }
           }
           else await restoreRollback(rollback)
-          middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+          middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
           invalidateSessionAnalysisReuse()
           const availableProfileIds = new Set((await catalog()).map(profile => profile.id))
           const resetSessionIds = []
@@ -2049,7 +2051,7 @@ export async function startBusinessRuntime({ packageRoot, userRoot, token, port 
           await persistSessionStates()
           pageObservations.delete(sessionId)
           verificationResults.delete(sessionId)
-          middleware = createMock({ projectRoot: source, overlayRoot: userRoot })
+          middleware = createMock({ projectRoot: source, overlayRoot: userRoot, profileSequenceCounts })
           return respond(res, 200, { ...state, status: 'applied-command', message: 'Preview will reload. Business outcome has not yet been verified.' })
         }
         return respond(res, 404, { error: 'Unknown desktop command' })
