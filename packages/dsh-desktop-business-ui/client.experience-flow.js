@@ -100,7 +100,13 @@ window.__ModuleLoader__.load({
           const value = kind === 'create' ? await bridge.approveBusinessWorkflowProposal(run.id, { proposalId: proposal.id, sessionId })
             : kind === 'route' ? await bridge.retryBusinessWorkflow(run.id, { selectedRoutePath: selectedRoute, confirmedByUser: true })
               : await bridge.resumeBusinessWorkflow(run.id, { restartVerification: true })
-          if (active) { attempted = ''; accept(value.run) }
+          if (active) {
+            attempted = ''; accept(value.run)
+            if (kind === 'create' && value.run?.status === 'failed') {
+              errorKind = 'create'
+              error = String(value.run.steps?.find(step => step.status === 'failed')?.error?.message || 'Creation failed')
+            }
+          }
         } catch (failure) {
           if (active) { error = String(failure); errorKind = kind }
         } finally { busy = ''; publish(); if (active) schedule() }
@@ -177,6 +183,9 @@ window.__ModuleLoader__.load({
       if (run && ['completed', 'cancelled', 'failed'].includes(run.status)) return null
       const proposal = proposalFor(run), plan = proposal?.output
       const choices = choicesFor(run)
+      // Only pre-creation decisions belong in the conversation. Keep background
+      // verification mounted, with progress and recovery available in diagnostics.
+      if (!plan && choices.length === 0) return null
       const busy = Boolean(state.busy)
       const compatible = run?.compatibility?.status !== 'incompatible'
       const title = plan?.label || run?.context?.plan?.label || t('dailyTitle')

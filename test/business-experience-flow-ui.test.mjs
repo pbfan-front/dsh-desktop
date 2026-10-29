@@ -25,7 +25,7 @@ const plan = { profileId: 'flow_receipt', label: '正常借据', page: 'repay', 
   { id: 'detail', label: '详情可提前结清', route: '/repay/receiptDetail', containsText: ['提前结清', 'LOAN-1'], absentText: ['系统繁忙'] }
 ] }
 
-async function setup({ proposed = true, locale = 'zh', legacy = false, single = false } = {}) {
+async function setup({ proposed = true, locale = 'zh', legacy = false, single = false, creationFailure = false } = {}) {
   const activePlan = { ...plan, verificationSteps: single ? plan.verificationSteps.slice(0, 1) : plan.verificationSteps }
   const runListeners = new Set(), evidenceListeners = new Set()
   const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'experience-run', onRunChanged: run => runListeners.forEach(listener => listener(run)) })
@@ -33,6 +33,7 @@ async function setup({ proposed = true, locale = 'zh', legacy = false, single = 
   const requestBusiness = vi.fn(async (path, input, sessionId) => {
     if (path === '/__desktop/resolve-target') return { routePath: '/repay/receiptList', pageTitle: '借据列表', source: 'explicit-route', confidence: 'high', candidates: [] }
     if (path === '/__desktop/analyze-target') return { evidenceId: 'evidence-flow', analysisPlan: { qualityGate: { level: 'review' } } }
+    if (path === '/__desktop/create-profile' && creationFailure) throw new Error('fetch failed')
     if (path !== '/__desktop/verify') return { ok: true }
     if (page.hold) await page.hold
     if (!page.selected || input.route !== page.route || page.missing) throw new Error('E_PREVIEW_VERIFICATION_FAILED: private technical diagnostic')
@@ -117,18 +118,18 @@ it('confirms the exact proposal in the conversation without checkboxes or openin
   expect(f.page.selected).toBe(false)
   expect(f.requestBusiness.mock.calls.some(([path]) => path === '/__desktop/apply')).toBe(false)
   expect(f.openTab).not.toHaveBeenCalled()
-  expect(f.container.textContent).toContain('分支已新增')
+  expect(f.container.textContent).toBe('')
 })
 
 it('waits quietly for the right branch/page, then checks ordered pages through the original checkpoint without clicks', async () => {
   const f = await setup({ proposed: false })
   await f.emit(); await f.tick()
   expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
-  expect(f.container.textContent).toContain('请在业务体验中勾选')
+  expect(f.container.textContent).toBe('')
   f.page.selected = true
   await f.emit({ fingerprint: 'b'.repeat(64) }); await f.tick()
   expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
-  expect(f.container.textContent).toContain('打开下面的页面')
+  expect(f.container.textContent).toBe('')
   f.page.route = plan.verificationSteps[0].route
   await f.emit({ fingerprint: 'c'.repeat(64) }); await f.tick()
   expect(f.runtime.getRun('experience-run').context.previewVerifications).toHaveLength(1)
@@ -153,8 +154,8 @@ it('does not spin on the same failing page; raw diagnostics stay folded and new 
   expect(f.bridge.resumeBusinessWorkflow).toHaveBeenCalledTimes(1)
   expect(f.runtime.getRun('experience-run').context.previewVerifications).toBeUndefined()
   expect(f.container.querySelector('[role=alert]')).toBeNull()
-  const diagnostic = [...f.container.querySelectorAll('details')].find(el => el.textContent.includes('private technical diagnostic'))
-  expect(diagnostic.open).toBe(false)
+  expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+  expect(f.container.textContent).toBe('')
   await f.emit(evidence); await f.tick(); await f.tick()
   expect(f.bridge.resumeBusinessWorkflow).toHaveBeenCalledTimes(1)
   f.page.missing = false
@@ -187,8 +188,9 @@ it('requires an explicit reset after branch reactivation and retains old page ev
   f.page.revisionId = 'activation-2'; f.page.route = plan.verificationSteps[1].route
   await f.emit({ fingerprint: 'b'.repeat(64) }); await f.tick()
   expect(f.bridge.resumeBusinessWorkflow).toHaveBeenCalledTimes(1)
-  expect(f.container.textContent).toContain('旧检查不能混用')
-  await act(async () => f.button('dailyRestartChecks').click())
+  expect(f.container.textContent).toBe('')
+  // Recovery remains available through the diagnostics bridge, not a conversation card.
+  await act(async () => { await f.bridge.resumeBusinessWorkflow('experience-run', { restartVerification: true }) })
   expect(f.bridge.resumeBusinessWorkflow).toHaveBeenLastCalledWith('experience-run', { restartVerification: true })
   expect(f.runtime.getRun('experience-run').context.previousPreviewVerifications).toHaveLength(1)
   expect(f.runtime.getRun('experience-run').context.previewVerifications).toEqual([])
@@ -199,7 +201,7 @@ it('does not automatically advance legacy records and has matching English copy'
   f.page.selected = true; f.page.route = plan.verificationSteps[0].route
   await f.emit(); await f.tick()
   expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
-  expect(f.container.textContent).toContain('The branch is available for manual selection')
+  expect(f.container.textContent).toBe('')
   expect(Object.keys(f.dictionaries.zh).sort()).toEqual(Object.keys(f.dictionaries.en).sort())
   expect(f.container.textContent).not.toContain('undefined')
 })
@@ -274,3 +276,19 @@ for (const created of [false, true]) {
     expect(f.runListeners.size).toBe(1)
   })
 }
+
+
+it('hides creation failure feedback while retaining the failed workflow without automatic replay', async () => {
+  const f = await setup({ creationFailure: true })
+  await act(async () => f.button('planConfirm').click())
+  expect(f.bridge.approveBusinessWorkflowProposal).toHaveBeenCalledTimes(1)
+  expect(f.runtime.getRun('experience-run')).toMatchObject({ status: 'failed', currentStepId: 'create-profile' })
+  expect(f.container.querySelector('[role=alert]')).toBeNull()
+  expect(f.container.textContent).toBe('')
+  expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+  expect(f.requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/create-profile')).toHaveLength(1)
+  await f.tick()
+  expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
+  await f.render('another-session'); await f.render('session-1')
+  expect(f.container.textContent).toBe('')
+})
