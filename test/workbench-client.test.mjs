@@ -3066,3 +3066,19 @@ describe('workbench feature default', () => {
     expect(await openError('false')).toBe('工作台功能已关闭。')
   })
 })
+
+
+it('keeps market availability notices inside the market instead of the conversation frame', () => {
+  const source = code.slice(code.indexOf('    function Notice('), code.indexOf('    function screenshotFor('))
+  const Notice = new Function('React', 'h', 'useWorkbench', 'tr', 'Button', source + ';return Notice')(
+    React, React.createElement, service => service, text => text, 'button')
+  const state = { ready: true, pending: 0, catalogError: 'offline' }
+  const render = (service, showCatalog) => renderToStaticMarkup(React.createElement(Notice, { service, showCatalog }))
+  expect(render(state, false)).toBe('')
+  expect(render(state, true)).toContain('在线市场暂时无法读取')
+  expect(render(state, true)).toContain('重试')
+  expect(render({ ...state, catalogError: '', catalogStale: true }, false)).toBe('')
+  expect(render({ ...state, catalogError: '', catalogStale: true }, true)).toContain('上一次成功读取的目录')
+  expect(render({ ...state, error: '本地工作台读取失败' }, false)).toContain('本地工作台读取失败')
+  expect(code).toContain("className: 'dshWb dshWbFrame' }, h(Notice, { service, showCatalog: false })")
+})

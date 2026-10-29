@@ -1305,7 +1305,7 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(service.subscribe, service.getSnapshot)
     }
     function Button({ children, primary, ...props }) { return h('button', { type: 'button', className: `dshWbBtn${primary ? ' dshWbPrimary' : ''}`, ...props }, children) }
-    function Notice({ service }) {
+    function Notice({ service, showCatalog = true }) {
       const { error, catalogError, catalogStale, pending, ready, restartNeeded } = useWorkbench(service)
       const [restarting, setRestarting] = React.useState(false)
       const bridge = globalThis.dshDesktop
@@ -1319,8 +1319,8 @@ window.__ModuleLoader__.load({
           : tr('请从菜单 Harness → 重启 Harness。'))
       if (error) return h('div', { className: 'dshWbNotice', role: 'alert' }, tr(error), ' ', h(Button, { disabled: pending > 0, onClick: () => service.run(service.load()) }, tr('重新加载')))
       if (!ready) return h('div', { className: 'dshWbNotice', role: 'status' }, tr('正在读取本地工作台…'))
-      if (catalogError) return h('div', { className: 'dshWbNotice', role: 'status' }, tr('在线市场暂时无法读取，仍可使用已安装的工作台。 '), h(Button, { disabled: pending > 0, onClick: () => service.run(service.refreshCatalog()) }, tr('重试')))
-      if (catalogStale) return h('div', { className: 'dshWbNotice', role: 'status' }, tr('在线市场暂时无法更新，正在显示上一次成功读取的目录。'))
+      if (showCatalog && catalogError) return h('div', { className: 'dshWbNotice', role: 'status' }, tr('在线市场暂时无法读取，仍可使用已安装的工作台。 '), h(Button, { disabled: pending > 0, onClick: () => service.run(service.refreshCatalog()) }, tr('重试')))
+      if (showCatalog && catalogStale) return h('div', { className: 'dshWbNotice', role: 'status' }, tr('在线市场暂时无法更新，正在显示上一次成功读取的目录。'))
       return null
     }
     function screenshotFor(entry) {
@@ -1995,7 +1995,7 @@ ${ACCEPTANCE_READING}先确认要公开的仓库和内容，不得公开密钥�
       const disabled = !ready || pending > 0 || service.blocked
       const visibleWorkspaces = workspaces.items.filter((item) => service.workspaceVisible(item.workspaceId, state.active))
       const chosen = visibleWorkspaces.find((item) => item.workspaceId === workspaceId) || service.defaultWorkspace()
-      return h('div', { className: 'dshWb dshWbFrame' }, h(Notice, { service }),
+      return h('div', { className: 'dshWb dshWbFrame' }, h(Notice, { service, showCatalog: false }),
         require('react-dom').createPortal(conversation, conversationContainer),
         ...loaded.filter((item) => item.customFrame === true).map((item) => h('div', { key: item.id, className: 'dshWbCustomFrame', hidden: id !== item.id, style: { position: 'relative', overflow: 'hidden', flex: 1, minHeight: 0, minWidth: 0, width: '100%', maxWidth: '100%', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' } }, h(PanelBoundary, null, h(item.Component, { service, entry: item, active: id === item.id, conversation: id === item.id ? h('div', { style: { display: hasCurrentSession ? 'contents' : 'none' } }, conversationMount) : null })))),
         h('div', { className: 'dshWbBody', hidden: customFrame, style: { '--workbench-business-width': `${(entry?.layout?.businessWidth ?? 0.36) * 100}%` } },
