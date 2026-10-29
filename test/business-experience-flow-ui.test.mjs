@@ -238,3 +238,19 @@ it('rejects a replaced proposal even if an old rendered confirmation handler is 
   expect(f.bridge.approveBusinessWorkflowProposal).not.toHaveBeenCalled()
   controller.dispose()
 })
+
+
+it('hides cancelled tasks both on live cancellation and when reopening their session, retaining diagnostics', async () => {
+  const f = await setup()
+  expect(f.container.querySelector('.dshExperienceFlow')).not.toBeNull()
+  await act(async () => { await f.runtime.cancel('experience-run') })
+  expect(f.container.textContent).toBe('')
+  expect(f.runtime.getRun('experience-run').status).toBe('cancelled')
+  await f.render('another-session')
+  await f.render('session-1')
+  expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+  expect(f.container.textContent).toBe('')
+  expect(f.bridge.approveBusinessWorkflowProposal).not.toHaveBeenCalled()
+  expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
+  expect(f.runListeners.size).toBe(1)
+})
