@@ -254,3 +254,23 @@ it('hides cancelled tasks both on live cancellation and when reopening their ses
   expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
   expect(f.runListeners.size).toBe(1)
 })
+
+
+for (const created of [false, true]) {
+  it(`hides failed ${created ? 'preview checks' : 'creation'} results, including reopened sessions`, async () => {
+    const f = await setup({ proposed: false })
+    const failed = JSON.parse(JSON.stringify(f.runtime.getRun('experience-run')))
+    failed.status = 'failed'
+    delete failed.checkpointProposal
+    if (!created) failed.steps = failed.steps.filter(step => step.id !== 'create-profile')
+    f.bridge.businessWorkflowRuns.mockResolvedValue({ runs: [failed] })
+    await act(async () => { f.runListeners.forEach(fn => fn(failed)) })
+    expect(f.container.textContent).toBe('')
+    await f.render('another-session')
+    await f.render('session-1')
+    expect(f.container.querySelector('.dshExperienceFlow')).toBeNull()
+    expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
+    expect(f.bridge.approveBusinessWorkflowProposal).not.toHaveBeenCalled()
+    expect(f.runListeners.size).toBe(1)
+  })
+}

@@ -172,9 +172,9 @@ window.__ModuleLoader__.load({
       const run = state.run
       React.useEffect(() => setRoute(''), [run?.id])
       if (run && sessionOf(run) !== sessionId || !run && !state.error) return null
-      // Completed and cancelled results belong in diagnostics; keep the dock for actionable work.
+      // Terminal results belong in diagnostics; keep the dock for actionable work.
       // Leave the controller mounted so a later request can show its own confirmation.
-      if (['verified', 'cancelled'].includes(state.phase)) return null
+      if (run && ['completed', 'cancelled', 'failed'].includes(run.status)) return null
       const proposal = proposalFor(run), plan = proposal?.output
       const choices = choicesFor(run)
       const busy = Boolean(state.busy)
