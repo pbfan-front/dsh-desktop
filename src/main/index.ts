@@ -577,7 +577,9 @@ function applyWindowChromeTheme(window: BrowserWindow, isDark: boolean): void {
 function configureAppIdentity(): void {
   if (developmentBuild) {
     app.setName('DSH Desktop Dev')
-    app.setPath('userData', join(app.getPath('appData'), 'dsh-desktop-dev'))
+    // Keep development data inside this checkout for workspace-write sandbox access.
+    // Existing appData development profiles remain untouched; this is a new data root.
+    app.setPath('userData', join(app.getAppPath(), '.dsh-dev-data'))
     return
   }
 

@@ -18,10 +18,11 @@ window.__ModuleLoader__.load({
      * an unchanged failure is performed here.
      */
     function createExperienceController({ bridge, sessionId, currentSession, visible, proposalFor, progressFor,
-      choicesFor, onChange, setTimer = setTimeout, clearTimer = clearTimeout, delay = 700 }) {
+      choicesFor, onChange, setTimer = setTimeout, clearTimer = clearTimeout, delay = 700, autoVerify = false }) {
       let active = true, run, evidence, timer, busy = '', error = '', errorKind = '', attempted = ''
       const pendingEvents = []
       let loading = true
+      let verificationRequested = autoVerify
       const eligible = () => active && currentSession() === sessionId && visible()
       const progress = () => progressFor(run)
       const phase = () => {
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
       }
       function schedule() {
         clear()
+        if (!verificationRequested) return
         const next = checkable()
         if (!next) return
         const key = JSON.stringify([run.id, next.id, evidence.fingerprint])
@@ -135,7 +137,7 @@ window.__ModuleLoader__.load({
         confirm: (runId, proposalId) => action('create', runId, proposalId),
         chooseRoute: (runId, route) => action('route', runId, undefined, route),
         restart: runId => action('restart', runId),
-        retry: () => { if (!eligible() || busy) return; attempted = ''; error = ''; errorKind = ''; publish(); schedule() },
+        retry: () => { if (!eligible() || busy) return; verificationRequested = true; attempted = ''; error = ''; errorKind = ''; publish(); schedule() },
         visibilityChanged: () => { if (!visible()) clear(); else schedule() },
         dispose: () => { active = false; clear(); pendingEvents.length = 0; unsubscribeRun?.(); unsubscribeEvidence?.() }
       }
@@ -160,21 +162,21 @@ window.__ModuleLoader__.load({
       document.head.appendChild(style)
     }
 
-    function BusinessExperienceDock({ sessionId, bridge, hostWindow, proposalFor, progressFor, choicesFor, t, openPreview, openDiagnostics }) {
+    function BusinessExperienceDock({ sessionId, bridge, hostWindow, proposalFor, progressFor, choicesFor, t, openPreview, openDiagnostics, autoVerify = false }) {
       const [state, setState] = React.useState({ run: null, phase: 'empty', loading: true, busy: '', error: '', errorKind: '' })
       const [route, setRoute] = React.useState('')
       const controller = React.useRef()
       React.useEffect(() => {
         installStyles()
         if (!sessionId || !bridge?.businessWorkflowRuns) return undefined
-        const instance = createExperienceController({ bridge, sessionId, proposalFor, progressFor, choicesFor,
+        const instance = createExperienceController({ bridge, sessionId, proposalFor, progressFor, choicesFor, autoVerify,
           currentSession: () => hostWindow.document.documentElement.dataset.dshBusinessSessionId || '',
           visible: () => !hostWindow.document.hidden, onChange: setState })
         controller.current = instance
         const visibility = () => instance.visibilityChanged()
         hostWindow.document.addEventListener('visibilitychange', visibility)
         return () => { instance.dispose(); hostWindow.document.removeEventListener('visibilitychange', visibility); controller.current = undefined }
-      }, [sessionId, bridge, hostWindow])
+      }, [sessionId, bridge, hostWindow, autoVerify])
       const run = state.run
       React.useEffect(() => setRoute(''), [run?.id])
       if (run && sessionOf(run) !== sessionId || !run && !state.error) return null

@@ -25,7 +25,7 @@ const plan = { profileId: 'flow_receipt', label: '正常借据', page: 'repay', 
   { id: 'detail', label: '详情可提前结清', route: '/repay/receiptDetail', containsText: ['提前结清', 'LOAN-1'], absentText: ['系统繁忙'] }
 ] }
 
-async function setup({ proposed = true, locale = 'zh', legacy = false, single = false, creationFailure = false } = {}) {
+async function setup({ proposed = true, locale = 'zh', legacy = false, single = false, creationFailure = false, autoVerify = true } = {}) {
   const activePlan = { ...plan, verificationSteps: single ? plan.verificationSteps.slice(0, 1) : plan.verificationSteps }
   const runListeners = new Set(), evidenceListeners = new Set()
   const runtime = new BusinessWorkflowRuntime({ idFactory: () => 'experience-run', onRunChanged: run => runListeners.forEach(listener => listener(run)) })
@@ -84,7 +84,7 @@ async function setup({ proposed = true, locale = 'zh', legacy = false, single = 
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container)
   let mounted = true
-  const render = async (sessionId = 'session-1') => { await act(async () => root.render(React.createElement(Dock, { sessionId, t: key => dictionaries[locale][key] }))) }
+  const render = async (sessionId = 'session-1') => { await act(async () => root.render(React.createElement(Dock, { sessionId, autoVerify, t: key => dictionaries[locale][key] }))) }
   const unmount = async () => { if (mounted) { mounted = false; await act(async () => root.unmount()) } }
   cleanups.push(async () => { await unmount(); disposers.reverse().forEach(fn => fn()); container.remove() })
   vi.useFakeTimers()
@@ -291,4 +291,20 @@ it('hides creation failure feedback while retaining the failed workflow without 
   expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
   await f.render('another-session'); await f.render('session-1')
   expect(f.container.textContent).toBe('')
+})
+
+
+it('does not verify after creation, matching page evidence, refresh or visibility changes unless explicitly requested', async () => {
+  const f = await setup({ autoVerify: false })
+  await act(async () => f.button('planConfirm').click())
+  expect(f.runtime.getRun('experience-run').currentStepId).toBe('wait-for-preview')
+  f.page.selected = true; f.page.route = plan.verificationSteps[0].route
+  await f.emit(); await f.tick()
+  await act(async () => document.dispatchEvent(new Event('visibilitychange')))
+  await f.tick(); await f.render('another-session'); await f.render('session-1')
+  await f.emit({ fingerprint: 'b'.repeat(64) }); await f.tick()
+  expect(f.bridge.resumeBusinessWorkflow).not.toHaveBeenCalled()
+  expect(f.requestBusiness.mock.calls.filter(([path]) => path === '/__desktop/verify')).toHaveLength(0)
+  await act(async () => { await f.bridge.resumeBusinessWorkflow('experience-run', { stepId: 'list' }) })
+  expect(f.runtime.getRun('experience-run').context.previewVerifications).toHaveLength(1)
 })

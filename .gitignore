@@ -44,3 +44,6 @@ docs/mobile-connection-latency.zh.md
 /.build/
 /packages/ppt-runtime/templates/
 /packages/ppt-bundles/
+
+# Checkout-local Desktop development profile (sessions and credentials)
+/.dsh-dev-data/

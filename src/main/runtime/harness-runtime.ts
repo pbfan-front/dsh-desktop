@@ -20,6 +20,8 @@ export interface HarnessRuntimeOptions {
   dshSafePatchPath: string
   /** Overlay for dshmarket's entry, passed only when the profile declares the market. */
   dshMarketPatchPath?: string
+  /** Explicit desktop plugin lookup path supplied by the caller. */
+  nodePath?: string
   dshHome: string
   logPath: string
   launchProcess(
@@ -308,7 +310,8 @@ export function buildHarnessSpawnOptions(
   dshHome: string,
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
-  profile: string = 'web'
+  profile: string = 'web',
+  nodePath?: string
 ): SpawnOptionsWithoutStdio {
   const {
     ELECTRON_RUN_AS_NODE: _runAsNode,
@@ -336,6 +339,7 @@ export function buildHarnessSpawnOptions(
       ...(platform !== 'darwin' && { ELECTRON_RUN_AS_NODE: '1' }),
       DSH_HOME: dshHome,
       NO_COLOR: '1',
+      ...(nodePath ? { NODE_PATH: nodePath } : {}),
       // package-import-method/child-concurrency are left at pnpm's defaults
       // (hardlink, auto concurrency): forcing clone-or-copy made every
       // install do a full physical file copy across the profile's 150+
@@ -554,7 +558,8 @@ export class HarnessRuntime {
           this.options.dshHome,
           process.platform,
           withDesktopHarnessEnvironment(shellEnvironment, process.env),
-          profile
+          profile,
+          this.options.nodePath
         )
       )
     } catch (error) {

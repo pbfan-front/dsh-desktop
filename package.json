@@ -22,6 +22,7 @@
     "desktop",
     "agent"
   ],
+  "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621",
   "scripts": {
     "postinstall": "patch-package && node scripts/install-brand-assets.mjs && install-electron --no",
     "dev": "npm run office:prepare && npm run ppt:build && electron-vite dev",
@@ -308,6 +309,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "node-bin-darwin-arm64": "^24.9.0",
     "@types/js-yaml": "4.0.9",
     "@types/node": "24.10.1",
     "@types/qrcode": "^1.5.6",
